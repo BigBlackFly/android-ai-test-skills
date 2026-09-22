@@ -1,0 +1,89 @@
+"""read：OCR 读屏。读 UI 树里没有的东西：toast、Canvas 自绘控件文字。
+
+用法：
+  python read.py --image storage/evidence/case172/step03/shot.png
+  python read.py --image <png> --region 100,200,900,400      # x1,y1,x2,y2
+  python read.py --name case172/step03 --region ...          # 不传 --image 则现场截一张
+"""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from common import (connect, emit, evidence_paths, fail, guard_terminated,
+                    log_auto, rel)
+import time
+from datetime import datetime
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="read：OCR 读取屏幕/截图文字")
+    # 只挂 read 真正用得到的参数：read 不产出 nodes，
+    # 故 --full/--no-filter/--settle/--perm-action/--perm 都不该出现（会误导）。
+    p.add_argument("--serial", default=None, help="多设备时指定 adb serial")
+    p.add_argument("--dir", default=None, help="证据根目录（默认 storage/evidence）")
+    p.add_argument("--name", default=None, help="证据名，如 case172/step03")
+    p.add_argument("--image", default=None, help="已有截图路径；缺省则现场截图")
+    p.add_argument("--region", default=None, help="x1,y1,x2,y2（截图坐标系）")
+    args = p.parse_args()
+
+    # 现场截图会被拦截；读"已有图片"（如崩溃前落盘的证据）放行——
+    # 那是复核证据，不是对已终止会话继续操作。
+    if not args.image:
+        guard_terminated("read")
+
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError:
+        fail("缺依赖：pip install rapidocr-onnxruntime")
+
+    if args.image:
+        img_path = Path(args.image)
+        if not img_path.exists():
+            fail(f"截图不存在: {img_path}")
+        evidence = rel(img_path)
+    else:
+        try:
+            d = connect(args.serial)
+        except Exception as e:  # noqa: BLE001
+            fail(f"设备连接失败: {e}")
+        png, _, meta = evidence_paths(args.dir, args.name)
+        png.parent.mkdir(parents=True, exist_ok=True)
+        d.screenshot().save(str(png))
+        img_path = png
+        evidence = rel(png)
+
+    ocr = RapidOCR()
+    started_at = datetime.now().isoformat(timespec="milliseconds")
+    t0 = time.perf_counter()
+    result, _ = ocr(str(img_path))
+    duration_ms = round((time.perf_counter() - t0) * 1000)
+    lines = []
+    from PIL import Image
+    img_w, img_h = Image.open(img_path).size
+    for box, text, score in (result or []):
+        xs = [pt[0] for pt in box]
+        ys = [pt[1] for pt in box]
+        cx, cy = int(sum(xs) / 4), int(sum(ys) / 4)
+        lines.append({
+            "text": text,
+            "score": round(float(score), 3),
+            "center": [cx, cy],
+            "norm": [round(cx / img_w, 4), round(cy / img_h, 4)],  # 屏宽高百分比，跨设备可移植
+            "bounds": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
+        })
+
+    if args.region:
+        x1, y1, x2, y2 = map(int, args.region.split(","))
+        lines = [l for l in lines
+                 if x1 <= l["center"][0] <= x2 and y1 <= l["center"][1] <= y2]
+
+    log_auto("read", "read",
+             f"OCR {len(lines)} 行" + (f" @ {args.region}" if args.region else ""),
+             {"lines": [l["text"] for l in lines]}, evidence, duration_ms, started_at)
+    emit(True, {"image": str(img_path), "lines": lines,
+                "hint": "center 可直接用于 act.py tap；toast 断言请在 act 后尽快 read（浮层会消失）"})
+
+
+if __name__ == "__main__":
+    main()

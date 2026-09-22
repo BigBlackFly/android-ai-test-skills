@@ -1,0 +1,424 @@
+# ZUI 日历（联想平板）
+
+- **app**: `com.zui.calendar`
+- **name**: ZUI 日历
+- **验证版本**: 9.0.0.110-2026.08.25-release（versionCode 900110，TB522FU / Android 17）
+- **最近验证**: 2026-09-22（169 图库/拍照权限 4 分支 PASS、179 小节间隔与冲突 3/3 PASS）
+- 无课程表前提：`state.py clear --package com.zui.calendar`
+- 图库/拍照导入的解析需联网（约 20s，等待窗口给到 60s）
+
+<!-- ⚠️ 本卡设备无关：只写 rid / 文案 / activity / 行为规律。
+     坐标、bounds、行距、"第 N 个箭头"这类数值一律不写 —— 换机型即失效。
+     需要定位时用 observe 拿 bounds 现场派生。 -->
+
+## 弹窗-首次启动三连
+
+`pm clear` 后首次启动会**按固定顺序连弹三个**（不知道这条会以为"主页打不开 / 更多找不到"）：
+
+1. **App 权限说明框**「日历需要使用以下权限」（必要/可选分组 + 退出/同意）
+   - 标题 rid `alertTitle`，同意 = `android:id/button1`
+   - ⚠️ 一命中就点会**点空**（入场动画未结束）：等约 1.5s 再点，点完核对框已消失
+2. **系统通知权限框**「日历正在尝试显示通知」
+   - rid `com.android.permissioncontroller:id/permission_allow_button_two`
+   - **不在 `com.zui.calendar` 包内**，按 App rid 找必然找不到；
+     走 `perm-intent` 默认同意即可自动点掉
+3. **课程表功能引导框**「课程表上新了！」
+   - 触发时机是 **`pm clear` 后首次启动、在【日历主页】上弹**，
+     **不是**"进入课程表功能时"
+   - 文案「课程表上新了！」/「点击快速导入课表，自动同步所有上课时间」/「我知道了」
+   - rid `curriculum_guide_title` / `curriculum_guide_message` / `timetable_guide_button`
+   - 点掉通知权限框后约 3-5 秒出现
+
+## 导航入口
+
+| 去向 | 走法 |
+|---|---|
+| 课程表模块 | 主页 → 右上角「更多」`iv_more`（无 text/desc，按 rid 定位）→ 菜单「课程表」 |
+| 周视图 `TimetableActivity` | 上一步的落点 = App 打开默认课表 |
+| 全部课程表列表页 `TimetableListActivity` | 周视图 → 顶栏 `action_curriculum_table_settings`（文案「课程表设置」）。**进课程表不会直接到列表页** |
+| 图库/拍照/手动创建 | 空状态页 `btnImportFromGallery` / `btnImportFromPhoto` / `btnCreateManually` |
+| 新建课程表（**已有课表时**） | 列表页右上角 `action_add_schedule` |
+| 设置页 `GeneralSettingsActivity` | 主页 `iv_more` → 菜单「设置」 |
+| 备份与恢复 `LenovoSettingsBackupActivity` | 见「设置页-备份与恢复」 |
+| 新建事件/提醒 `NewBuildActivity` | 主页右上角 `action_add_all_event`（ImageView，无 text/desc） |
+
+## 页面-备份与恢复
+
+入口：主页 `iv_more` →「设置」→ `GeneralSettingsActivity`。
+
+- 设置页是 `recycler_view` **长列表**，「备份与恢复」在**第 3 屏**（需 2 次上滑），
+  位于「其它」分组下（时区之后）。**首屏看不到它** —— 只扫首屏会误判"没有该入口"
+- 上滑后**重读 UI 树**再找，不要按固定次数滑
+
+备份与恢复页 `LenovoSettingsBackupActivity` 控件（**都在首屏**）：
+
+| 元素 | rid |
+|---|---|
+| 自定义恢复 | `selecte_restore_layout`（整行可点） |
+| 一键备份 | `backup_button` |
+| 一键恢复 | `restore_button` |
+
+### 坑-清数据会清掉备份
+
+备份产物在 `/sdcard/Android/data/com.zui.calendar/cache/LenovoCalendar/BackUp/<时间戳>/`
+（含 `Events.vcs` + `114_lecalendar.db`）。
+
+**虽然该路径在外部存储，但 `pm clear` 在 Android 11+ 会连 App 的外部
+`Android/data/<pkg>/` 一起清掉** —— 实测 clear 后目录直接消失。
+
+后果：「先清数据、再一键恢复」这类前置**自相矛盾**：清完就没备份可恢复，
+点「一键恢复」只提示**「未找到可用的备份记录」**（既不弹 dialog 也不出 toast）。
+
+**写"恢复"类用例的正确姿势**：前置要备份，但**不要** `pm clear`；
+若要验证"清数据后恢复"，必须先把备份目录拷出来、clear 后再拷回去。
+
+### 一键恢复的信息反馈
+
+点「一键恢复」后是**两段式反馈**（都会出现）：
+1. 模态 dialog「正在努力恢复」（转圈，约 0.6~2.8s）
+2. 底部 toast「**恢复成功**」
+
+**用例只断言 toast，不管 dialog。**
+
+抓 toast 的正确手法（⚠️ 别再自创）：
+1. `act tap` 触发（按钮坐标从 observe 的 bounds 派生）
+2. **等约 2s**（等 dialog 关闭 + toast 渲染；**不要中间插 observe**，截图会挤掉窗口）
+3. `read.py` 整屏 OCR → 文本含「恢复成功」即通过
+
+三个坑：
+- **toast 不在 UI 树里**：observe 的 dump 永远读不到它，只能靠 read.py 像素 OCR。
+  用 UI 树文本判定"toast 不存在"是**方法错误导致的假 FAIL**
+- **不要边采样边 OCR**：RapidOCR 单次约 4–9s，会把采样间隔拖到 10s 以上、错过浮层。
+  要连拍就**先只截屏、后批量 OCR**
+- **不需要录屏/连拍**：点击后等 2s 截一张即可稳定拿到
+
+### 页面-自定义恢复 `SelectRestoreActivity`
+
+- 列表项文本形如 `日历_2026年9月17日_10时37分02秒`
+- **右上角「编辑」是纯图标**（无 text/desc）→ rid `edit_menu`，不能按文字定位
+- 编辑模式：标题 `listviewx_edit_title`「选取项目」；`listviewx_select_all`「全选」；
+  `listviewx_cancel` 取消；`restoreBtnDelete`「删除」
+  - **置灰判定看 `enabled`**：未勾选 `enabled=false`，勾选 `slideview_check` 后变 `true`
+- 点删除 → 二次弹窗「**删除所选的记录？**」；点某条 → 「**恢复到所选的备份记录？**」
+- 选择框 rid = `slideview_check`（每行一个）
+
+## 页面-新建事件 `NewBuildActivity`
+
+- 进入：主页 `action_add_all_event`，或**长按桌面图标 →「创建提醒」**
+- 标题占位文本 = 「请输入提醒」（按 text 定位后输入）
+- 备注字段按 text=「备注」定位后输入
+- 大量文字（600 字）输入正常，无崩溃/ANR
+
+## 页面-列表页（全部课程表）
+
+- 标题「全部课程表」；列表项 `tv_schedule_name`（名称）/ `tv_default_badge`（「当前」角标）/
+  `tv_schedule_info`（「设置」）
+- 顶栏两图标：`action_schedule`（文案「编辑」）、`action_add_schedule`（文案「添加课程表」）
+
+### 设为当前课程表
+
+- 确认框「**确定设为当前课程表吗？**」+ 取消(`android:id/button2`) / 确定(`android:id/button1`)
+- 确定 → 「当前」角标移到选中行；取消 → 仅关框不改状态
+- 删除弹框文案**随勾选数量变化**：「确定要删除选中的 **N** 个课程表吗？」
+
+### 坑-删除全部课程表后的两种"空"
+
+| 时机 | 落点 | 三按钮 |
+|---|---|---|
+| 删除全部**当场** | 列表空态「没有课程表」+「点击 + 创建新课程表」 | ❌ 无 |
+| **重新进入**课程表 | 引导式空状态页「还未添加课程表」 | ✅ 三个都在 |
+
+删光后列表页**不会自动跳转**，要**离开再回来**才回到引导式空状态页。
+断言"空状态三按钮"必须补"重新进入"这一步，否则误判 FAIL。
+
+### 多选态与置灰规则
+
+点 `action_schedule` → 多选态：出现 `checkbox_select` + `bottom_bar` +
+`btn_set_default` / `btn_delete`。**置灰规则看 `enabled` 字段**：
+
+| 勾选情况 | btn_set_default | btn_delete |
+|---|---|---|
+| 仅勾选**当前**课程表 | `false`（置灰） | `true` |
+| 勾选**多个**（含当前） | `false`（置灰） | `true` |
+| 仅勾选**非当前**课程表 | `true`（可用） | `true` |
+
+即：**勾选集合含"当前课程表" → 设为当前置灰**。
+
+⚠️ 删除弹框文案「确定删除**此**课程表吗？」区别于课程卡片的
+「确定删除**此课程**吗？」（后者是删单条课程）。
+
+- 新建的课表**不自动抢占"当前"**
+
+## 页面-课程表空状态
+
+- 文案「还未添加课程表」；容器 `emptyView`
+- 三个入口按钮直接铺在屏幕上（**此时没有工具栏，不要再找「更多」菜单**）
+- 图库导入出口 = 系统 PhotoPicker
+  （`com.android.providers.media.module/.photopicker.PhotoPickerGetContentActivity`）
+
+## 链路-导入弹窗顺序（拍照/图库通用，先读这条）
+
+点「拍照导入」或「从图库导入」后是**两段式、有先后**：
+
+1. **App 内提示弹窗**「请确保图片清晰、完整」→ 点「知道了」
+   - 日历自己的框，**与系统权限弹窗无关，无论权限是否已授予都会弹**
+   - **必须关掉，否则后面什么都不发生**：不点掉，相机 25s 都不拉起、PhotoPicker 也不出现
+2. **系统权限弹窗**（相机/照片）→ **仅当对应权限未授予时才弹**；已授予则跳过
+   - 由 `perm-intent` 自动响应（默认同意）
+
+测权限行为前若上一轮已允许过，需 `revoke` 重置前提，否则第 2 段根本不出现。
+
+## 链路-图库导入（到「确认课程表基本信息」页）
+
+- 解析需联网（约 20s），**等待窗口给到 60s**；低于 20s 会在解析中途误判超时
+- 素材 `/sdcard/Pictures/日历/课程表.png`，导入前先发 `MEDIA_SCANNER_SCAN_FILE` 广播，
+  否则 PhotoPicker 显示「无相册」
+- **选图别盲点第一张**：照片 tab 按媒体库时间倒序、所有缩略图**共用
+  `icon_thumbnail` 一个 rid** → 第一张取决于媒体库最近有什么（其他用例拍照/截图会插队；
+  `pm clear` 不清 `/sdcard`）。要先看缩略图内容再选（AI 判图或视觉通道）
+- **解析失败弹窗（模态，非 toast）**：标题「图片内容不是课程表」+ 正文 +「知道了」
+  - 这是**通用解析失败框**：选错图会弹、**真课程表云端解析偶发失败也弹**
+    → 不能据断定"图选错了"
+  - 点「知道了」后回裁剪页。预检通过的候选被弹此框 = 偶发失败 → 重试同一张；
+    总次数上限 3 次，用尽 BLOCKED，**禁止归因为"超时/需联网"**
+- **目标页控件（断言用）**：名称 `et_schedule_name`（图库导入预填「学生课程表」）、
+  完成 `btn_finish`、学期开始 `layout_semester_start_date`/`tv_semester_start_date`、
+  当前周数 `layout_current_week`/`tv_current_week`、总周数 `layout_total_weeks`/`tv_total_weeks`、
+  周末有课 `switch_weekend_classes`、显示非本周 `switch_show_non_current_week`
+- **学期总周数弹框 = 滚轮选择器**：当前值居中高亮，数字为 Canvas 绘制 **dump 读不到**
+  → 用 `read.py` OCR 定位数字坐标后点选
+- **必填校验（与规格不符）**：名称清空后「完成」**不置灰**（dump `enabled=true`），
+  点击后**停留确认页被校验拦截**。规格写"必填为空完成置灰"时按用例记 FAIL 并注明实际行为
+  - **置灰断言**：日历的置灰是「整体变淡」，UI 树 `enabled/clickable` 可能不变；
+    以截图判读或按用例预期，未配置视觉凭据时降级 WARN（不是 FAIL）
+- 学期开始点开为系统 DatePicker（`android.widget.DatePicker`），「取消」关闭
+
+## 链路-拍照导入（到相机拉起）
+
+空状态页「拍照导入」→ 提示弹窗「知道了」→ 相机权限弹窗（未授予时）→
+`com.zui.camera/.CaptureActivity`。
+
+- **提示弹窗不关，相机 25s 都不拉起**
+- 从相机返回：返回键可能被取景器吃掉，`am force-stop com.zui.camera` 更快更稳；
+  且退回的是**日历主界面**（不是课程表页），需重新走「更多 → 课程表」
+
+## 链路-手动创建（到新建课程表页）
+
+链路只有一步（`btnCreateManually` → `EditTimetableActivity`），坑全在目标页：
+
+- 名称默认空且**必填**：不填点「完成」会被校验拦住（页面不动）；图库导入确认页才有预填名
+  - ⚠️ **与需求的差别**：需求要求"名称为空时完成按钮**置灰**"；实测**不置灰**
+    （`save_view` 的 `enabled=true`、`clickable=true`），而是**点击后被校验拦住**
+    （页面停在编辑页、无 toast）。即"必填约束存在、表现形式与需求不符"
+- 保存 = toolbar 右侧 `save_view`（文本「完成」，clickable），**不是** `btn_finish`；
+  `action_save` 是其不可点父容器
+- **不要按 back 收键盘** —— back 会直接退出 `EditTimetableActivity` 丢编辑
+- 两个开关**默认均关闭**（`switch_weekend_classes`/`switch_show_non_current_week` checked=false）；
+  图库导入确认页的「显示非本周课程」可能默认开启，两者默认态不同
+- ⚠️ **「新建课程表」页本身就是「课程表基本信息编辑页」**：同一 `EditTimetableActivity`，
+  含 名称框 + 学期信息 + 课程时间设置 + 课程提醒时间 + 两个开关。
+  用例前提写"手动创建后进入基本信息编辑页"时，**停在本页即可**
+- ⚠️ **点「完成」保存后的落点是周视图**（不是列表页），且**新建的课表名不会作为
+  可点列表项出现**；按"列表页点课名进编辑页"寻路会 BLOCKED
+
+## 页面-确认页导航关系（拓扑）
+
+- 「确认课程表基本信息」页点左上角返回 → 「确认识别结果」页
+  （`TempTimetableActivity`），**不是**课程表页也不是主页；要重进就再点「下一步」
+- 识别结果页顶栏右侧**没有图标**
+- 确认页点「完成」→ 创建课程表 → 课程表列表（含「全部课程表 / <课表名> / 当前 / 设置」）；
+  多课表时**每个课表名下各带一个「设置」**
+- 「当前」标签跟在**原有**课表后面 —— 新导入/新建的课表**不会自动抢占当前**
+
+## 页面-课程时间设置页
+
+入口：编辑页的「课程时间设置」行 `layout_time_settings`（**不是**
+`layout_time_slot_settings`）。Activity
+`com.zui.calendar/.timetable.management.TimeSlotSettingsActivity`。
+
+默认值都有独立 rid，**可直接断言，不用 OCR**：
+
+| 字段 | rid | 图库导入路径 | 手动创建路径 |
+|---|---|---|---|
+| 每节课上课时长 | `tv_lesson_duration` | 30分钟 | 50分钟 |
+| 课间休息时长 | `tv_break_duration` | 10分钟 | 10分钟 |
+| 上午课程节数 | `tv_morning_slot_count` | 4节 | 4节 |
+| 下午课程节数 | `tv_afternoon_slot_count` | 5节 | 4节 |
+| 晚上课程节数 | `tv_evening_slot_count` | 0节 | 4节 |
+
+**默认值因创建路径不同** → 按实际路径断言，跨路径断言会误判。
+
+- 时长两行的**可点容器**是 `layout_lesson_duration` / `layout_break_duration`；
+  `tv_lesson_duration` / `tv_break_duration` 只是值节点（`clickable=false`），点值节点无效
+- 节次明细「第1节」与「08:00-08:30」是**两个独立文本节点** → 断言要分别匹配，
+  别要求同一节点同时含「第」和「-」（否则永远匹配不到、把正常产品误报成 FAIL）
+- 两个时长弹框的内容区是 **Canvas 自绘**（`customPanel` 下无 dump 子节点），当前值读不到：
+  只断言弹框打开（标题 + 取消/确定），数值用 `read.py` OCR 补读并记 INFO ——
+  弹框半透明，OCR 会混入背景文字，**不可作断言**
+- 「上午课程 / 下午课程 / 晚上课程」是**分组标题**（`clickable=false`），点了页面不动是正常
+- 返回确认页用 BACK 键；**别点本页「完成」**（会直接创建课程表）
+
+### 坑-必须先读值再操作
+
+**元素不在当前视口时按 rid 读返回 `''`** —— 直接判会连报 FAIL。顺序：
+
+1. 进页面立刻读首屏值（上课时长 / 休息时长 / 上午 / 下午节数）
+2. 再上滑读 `tv_evening_slot_count`（懒加载）
+3. 要断言的「默认时间显示」必须**在改时长之前**采集快照
+
+第 3 点尤其关键：**节行时间随「上课时长/课间休息」实时重算** —— 把时长拨到 30 分钟后
+所有节行变成 30 分钟制，此时再断言原始时间必然 FAIL。
+**更强的写法**：能"滚到可见再读"就不要依赖排好的读取顺序。
+
+### 节行定位（共用 rid，没有 per-slot rid）
+
+所有小节共用 `item_container` / `tv_slot_number`（第N节）/ `tv_time_range`（时间）/
+`iv_arrow`（可点，desc=编辑）。定位第 N 节 = 取 `iv_arrow` **按 bounds 的 y 排序后取下标**。
+跨屏读全部节行要逐屏下滚 + 并集累加（UI 树只返回当前视口，一屏装不下 12 节）。
+
+### 节数 ＋/－ 按钮是 ImageView
+
+「+」「－」是图形（OCR 会读成粘连文本）。固定 rid：
+减号（desc=删除）`btn_remove_<morning|afternoon|evening>_slot`；
+加号（desc=新建）`btn_add_<morning|afternoon|evening>_slot`。
+
+### 课程提醒时间入口
+
+`layout_default_reminder`（可点行）/ `tv_default_reminder`（行内值）。
+入口在**编辑页** `EditTimetableActivity` 首屏，**不在课程时间设置页**。默认 `5分钟前`。
+
+- 点开是 RadioGroup（非 Canvas，文本可读）：`不提醒 / 任务发生时 / 5分钟前 /
+  15分钟前 / 30分钟前`，底部「取消」
+- ⚠️ RadioButton 的 `checked`/`selected` **本 ROM 不暴露在 dump 里**（视觉有绿点，
+  dump 节点是 False/缺）→ 别用 `enabled/checked` 判定；改读**行内显示值**
+  （选中即时更新行内，弹框里没有"确定"）或看截图
+- 点其它项即时换行内值；点「取消」/点外面关弹框都**保留新值**
+
+### 弹框滚轮-上课时长循环、课间休息钳制
+
+两个轮的边界行为**不一样**：
+
+- **每节课上课时长**（`{30,35,…,120}`，每档 5）：**循环** —— 实测 `120 再拨 5 档 → 50分钟`
+- **课间休息**（`{5,10,15,20,25,30}`，每档 5）：**钳制** —— 实测 `30 再拨 5 档 → 30分钟`
+
+方向：**上=减小、下=增大**（两轮一致）。
+
+所以「可选择 30-120 / 5-30」的验证姿势：**拨到上端核对到位 → 再越界多拨几档 →
+断言值仍落在值域内**（循环与钳制都满足诉求），实际行为记 INFO。
+**不要**断言"必然回绕"（历史上 5 次 2 通过 3 失败，全是这条）。
+
+### 坑-OCR 偶发漏读时别让 OCR 进判定循环
+
+实测：目标值 5 但 OCR 在弹框内返回 None → 脚本以为"没动"继续点 → 在循环上绕圈 →
+走满上限 → 原地打转 14 分钟。
+
+**正确做法**：按**档位次数**点按（不读 OCR 反馈），点确定，**读 UI 树文本**
+（`tv_lesson_duration`/`tv_break_duration`）作判据。
+
+## 页面-节行编辑弹窗（双滚轮）
+
+- 设置页 desc=编辑 的 arrow，**按 y 排序后前 2 个是「每节课上课时长/课间休息时长」行，
+  第 3 个起才是节行** —— 按序号定位前先排序
+- 节行弹窗 = 同款 Canvas 双滚轮（左=开始 时+分，右=结束 时+分），无 UI 节点，
+  读值用 `read.py` OCR（先看选中行、再按列 x 匹配）
+- **改值用点按 ±1**：点选中行**下方一格=+1、上方一格=-1**，比滑动稳（滑动有惯性会过冲）
+- 修改任一小节点「确定」后会弹**「是否根据课程时长和休息时长自动调整其他课程？」**
+  确认框 → 点「确定」（**真实产品流程，不是干扰弹窗**）
+- **同步规则（实测）**：第1节结束改 :53 后，上午后续节 = 前节结束 + 课间休息
+  （…→09:03-09:53→10:03-10:53→11:03-11:53）；**下午/晚上不受影响**；
+  「每节课上课时长」仍 50分钟
+- **冲突表现（上午末节结束 > 下午开始）**：冲突两节的时间文字**变红**
+  （UI 树无色值，看截图判断）；点右上角「完成」→ toast
+  **「课程时间有冲突，无法设置」**（窗口约 2-3s）
+  - 抓这个 toast：点击后**立即** `read.py` 整屏 OCR 匹配「冲突」；
+    中间多一次 observe 截图就会占满窗口
+  - ⚠️ 本页右上角「完成」是 `save_view`，**bounds 中心点击可能无反应**，
+    必要时带偏移；换机型先小探针校准
+
+## 页面-权限弹窗（本 App 文案）
+
+**通用机制（默认同意、先拒后允、rid 匹配）见 `_system.md`「权限弹窗-响应机制」
+—— 那是跨 App 系统行为，本卡不复制。**
+
+本 App 实测（Android 17）：
+- **首次** = 仅在使用时允许 / 仅本次使用时允许 / **拒绝**
+- **拒绝后再请求** = 同上，末项变 **拒绝并不再询问**
+- MEDIA 首次 = 选择照片 / 全部允许 / **拒绝**
+- 拒绝后 App 自弹提示框（**不是系统弹窗**），可作「提示需要授予权限」的断言依据：
+  文案「需要权限」+「拍照和导入课程表需要相机权限，请前往设置中开启」/「访问相册和导入
+  课程表需要存储权限，请前往设置中开启」，按钮 取消 / 前往设置
+
+## 页面-空课表周视图 `TimetableActivity`
+
+- toolbar 标题 = 课表名，副行 = 当前周数（第N周）
+- 结构 = viewPager + 表头周几（`tv_monday…tv_friday` + `_date`）+
+  recyclerView 网格（`tv_section` 节号 + `tv_time`）
+- 顶栏 `action_curriculum_table_import` / `action_curriculum_table_settings`
+- 空格子 = `cv_empty_content`（clickable）。**点空格 → 直接进添加课程页**，不是弹框
+- ⚠️ **改版：加号中间态已移除**。旧链路「点空格 → 出现加号浮标 `iv_add_hint` → 再点」
+  **已不成立**：点空格后连续多次 dump UI 树完全没变、`iv_add_hint` 不存在，
+  **第二次**点空格才进添加课程页（第一次点击被"吸收"）
+  → 统一走"点一次不成再点一次、命中即停"，**不要再等 `iv_add_hint`**
+  「+」是图无文本/desc，判定用 rid 而非文本
+
+## 页面-添加/编辑课程 `EditCourseActivity`
+
+「新建课程」与「编辑课程」是**同一个页面**：
+
+- 字段 rid：课程名 `etCourseName`（必填）/ 教室 `etClassroom` / 备注(老师) `etTeacher`；
+  课程时间 `llCourseTime` / `tvCourseTime`（默认"第1节"）；上课周数 `llCourseWeeks` /
+  `tvCourseWeeks`（默认"第1-20周"）；背景色 `llCourseColor`（行显示 `viewColorIndicator`）
+- **底部「删除课程」= `btnDelete`**（仅编辑态有）；右上角「完成」= 保存退出；左上角 desc=关闭
+- **「课程背景色」点行弹独立 AlertDialog**（`alertTitle`/`customPanel`/`buttonPanel`）。
+  `customPanel` 内 **10 个纯色块**（clickable 无 text/desc）
+  - ⚠️ **数色块要看图**：UI 树数 clickable 会被嵌套/装饰节点干扰（实测 25≠10），
+    看当步 `shot.png` 数准确
+- **布局**：`curriculum_scroll_view` 内容区在本机型一屏内 —— **所有字段都在首屏**。
+  踩过的坑：误以为"在首屏之外"就无脑上滑，把本来可见的元素滚出屏幕上方、越滚越找不到
+  → **读不到元素时先滚回顶部再逐屏向下找（双向）**
+
+## 页面-课程查看/编辑/删除
+
+**页面拓扑（别走错）**
+
+- 列表页**点课名 = 编辑课程表**（`EditTimetableActivity`），**不是查看**
+- 列表页 **BACK 一次 = 周视图**；再 BACK = 日历主页。**这是从列表页到周视图最便宜的边** ——
+  别回主页重走「更多 → 课程表」（多 3 步），更别重跑「图库导入 → 保存」（约 100s）
+
+**课程卡片 → 编辑页是两段，不是一段**：点周视图课程卡片 `curriculum_card_view` →
+**先进「课程列表」弹框** `CourseListActivity`（`clCourseDetail` / `tvFirstLine` 课程名 /
+`tvSecondLine`「第1节 | 第1-20周」）→ 再点 **`ivEdit`**（desc=编辑）才进编辑页。
+直接按"点卡片=进编辑"写用例会挂在找不到 `etCourseName`。
+
+**删除确认框**：标题「确定删除此课程吗？」，取消 `android:id/button2`，删除 `android:id/button1`。
+
+- 断言用**课程数减少**，不要用"课程名消失"（同名课程有多门）
+- ⚠️ **基准必须在周视图上取**：编辑页里读不到课程列表，会拿到空；
+  而 `空集 ⊆ 任意集合` 恒真 → 「取消后课程仍在」会变成**无论是否真删除都 PASS 的假阳性**。
+  基准务必在打开编辑页**之前**、回到周视图后取，且基准为空时按 WARN 处理而非 PASS
+- ⚠️ **网格异步渲染**：进周视图立刻 dump 可能拿到空 recyclerView →
+  按 rid 轮询等待，别一次性读取就下结论
+
+## 验证要点
+
+- 「进入某界面」用回传的 `activity` 字段判定
+- 名称类输入默认覆盖已有内容
+- 时间选择器点「确定」后看背景列表该节时间是否更新；新建课程保存后看列表是否出现
+- 右上角「完成」= 保存并返回；对话框里「确定」= 确认当前选择
+
+### 纪律-不要主动锁旋转
+
+**用例不涉及横竖屏时，禁止主动改旋转设置**（`accelerometer_rotation` / `user_rotation`）。
+
+理由：主动锁了竖屏，App 冷启动又会把 `accelerometer_rotation` 改回 1 →
+会话起止 rotation 不一致，报告里全是「方向漂移」噪音、**PASS 变 WARN**。
+实测：7 个用例去掉主动锁旋转后，全部从 WARN 变回干净 PASS。
+
+- 只有**真正测横竖屏**的用例才动方向，且动作前后 observe 记录 rotation、测完恢复
+- **坐标一律从当次元素 bounds 派生**，不要依赖"屏幕一定是竖的"
+
+### 纪律-只断言 toast，不追弹窗
+
+用例关心的是 **toast**（用户可见的结果反馈），**不关心途经的 dialog/弹窗**。
+不要为"某个 dialog 是否出现"设计采样、连拍、录屏 —— 那是过度工程，
+且极易把方法问题误判成产品问题。

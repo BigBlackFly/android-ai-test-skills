@@ -1,0 +1,773 @@
+/* Android AI 测试台前端（零依赖 vanilla JS + echarts） */
+"use strict";
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
+const main = $("#main");
+let kbCurrent = null;    // 当前编辑的知识卡名
+let caseFilter = "all";  // 用例库当前模块过滤
+let showDiag = false;    // 测试记录是否显示验证/调试会话
+
+// ── 工具 ──
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+const esc = s => String(s ?? "").replace(/[&<>"]/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const statusChip = s => s ? `<span class="chip ${esc(s)}">${esc(s)}</span>` : "";
+
+/* 标准时间展示：ISO(含毫秒/无时区) → YYYY-MM-DD HH:MM:SS
+   后端存的是本地时间 isoformat（如 2026-09-21T18:57:09.517），
+   直接 slice 即可，避免 Date 解析无时区字符串产生偏移。 */
+function fmtTime(v, withDate = true) {
+  if (!v) return "—";
+  const s = String(v).replace("T", " ");
+  const date = s.slice(0, 10);
+  const time = s.slice(11, 19);
+  if (!time) return withDate ? date : "—";
+  return withDate ? `${date} ${time}` : time;
+}
+const fmtDate = v => v ? String(v).replace("T", " ").slice(0, 10) : "—";
+
+/* 耗时：秒 → 时/分/秒可读形式
+   0s→"0秒"，45s→"45秒"，90s→"1分30秒"，3725s→"1时2分5秒"
+   只保留有意义的高位单位，避免 "0时0分45秒" 这种噪音。 */
+function fmtDuration(sec) {
+  if (sec === null || sec === undefined || isNaN(sec)) return "—";
+  const n = Math.round(Number(sec));
+  if (n < 0) return "—";
+  const h = Math.floor(n / 3600);
+  const m = Math.floor((n % 3600) / 60);
+  const s = n % 60;
+  if (h) return m ? `${h}时${m}分${s}秒` : `${h}时${s}秒`;
+  if (m) return `${m}分${s}秒`;
+  return `${s}秒`;
+}
+
+/* 状态中文标签（判定规则见 SKILL.md） */
+const statusCN = {
+  PASS: "通过", FAIL: "失败", WARN: "警告",
+  BLOCKED: "阻断", ERROR: "错误",
+  running: "执行中", paused: "已暂停", waiting: "等待答复",
+};
+const statusText = s => s ? (statusCN[s] || s) : "—";
+
+/* 模块名（包名）友好化 */
+const pkgShort = p => {
+  if (!p || p === "未识别") return "未识别";
+  const parts = String(p).split(".");
+  return parts.length > 2 ? parts.slice(-2).join(".") : p;
+};
+
+// ── 通用弹窗 ──
+function modal(title, bodyHTML, footerHTML = "") {
+  const el = document.createElement("div");
+  el.className = "modal-mask";
+  el.innerHTML = `
+    <div class="modal">
+      <div class="modal-head"><b>${esc(title)}</b><span style="flex:1"></span>
+        <button class="ghost modal-x" title="关闭">✕</button></div>
+      <div class="modal-body">${bodyHTML}</div>
+      ${footerHTML ? `<div class="modal-foot">${footerHTML}</div>` : ""}
+    </div>`;
+  document.body.appendChild(el);
+  const close = () => el.remove();
+  $(".modal-x", el).addEventListener("click", close);
+  el.addEventListener("click", ev => { if (ev.target === el) close(); });
+  return { el, close };
+}
+
+// ── 视图路由（点哪个哪个高亮）──
+const VIEWS = {
+  dashboard: () => viewDashboard(),
+  sessions: () => viewSessions(),
+  cases: () => viewCaseLib(),
+  knowledge: () => viewKnowledge(),
+  vision: () => viewVision(),
+};
+function activateNav(view) {
+  $$(".nav-item").forEach(x => x.classList.toggle("active", x.dataset.view === view));
+}
+$$(".nav-item").forEach(el =>
+  el.addEventListener("click", () => {
+    activateNav(el.dataset.view);
+    (VIEWS[el.dataset.view] || viewDashboard)();
+  }));
+
+// ══════════════════ 仪表盘 ══════════════════
+let dashCharts = [];
+async function viewDashboard() {
+  dashCharts.forEach(c => { try { c.dispose(); } catch {} });
+  dashCharts = [];
+  activateNav("dashboard");
+  main.innerHTML = "<div class='sub'>加载中…</div>";
+  const d = await api("/api/dashboard");
+  const ov = d.overview || {};
+  const total = ov.total || 0, pass = ov.pass || 0, fail = ov.fail || 0;
+  const blocked = ov.blocked || 0, neverRun = ov.never_run || 0;
+  const runPct = total ? Math.round(pass / total * 100) : 0;
+
+  // 最近 3 天：横轴只显示日期（MM-DD），缺失的天补 0
+  const labels = ["今天", "昨天", "前天"];
+  const today = new Date();
+  const threeDays = [];
+  for (let i = 0; i < 3; i++) {
+    const dt = new Date(today.getTime() - i * 86400000);
+    const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+    const r = (d.recent || []).find(x => x.day === key) || {};
+    const tot = r.total || 0;
+    threeDays.push({
+      label: labels[i], date: key,
+      total: tot, pass: r.pass || 0, fail: r.fail || 0, blocked: r.blocked || 0,
+      passRate: tot ? Math.round((r.pass || 0) / tot * 100) : 0,
+      failRate: tot ? Math.round((r.fail || 0) / tot * 100) : 0,
+    });
+  }
+  // 柱状图按时间正序（前天→今天）
+  const chartDays = [...threeDays].reverse();
+
+  // 模块：按成功率从低到高排（最需要关注的排最前）
+  const mods = (d.modules || []).map(m => {
+    const ran = (m.pass || 0) + (m.fail || 0) + (m.blocked || 0);
+    return {
+      ...m,
+      ran,
+      passRate: ran ? Math.round((m.pass || 0) / ran * 100) : null,
+    };
+  }).sort((a, b) => {
+    // 无执行记录的排最后；其余按成功率升序
+    if (a.passRate === null && b.passRate === null) return b.total - a.total;
+    if (a.passRate === null) return 1;
+    if (b.passRate === null) return -1;
+    return a.passRate - b.passRate;
+  });
+
+  main.innerHTML = `
+    <h1>仪表盘</h1>
+    <div class="sub">用例资产与执行结果总览</div>
+
+    <div class="panel">
+      <div class="dash-top">
+        <div class="dash-seg seg-count">
+          <div class="seg-label">用例总数</div>
+          <div class="big-num">${total}</div>
+        </div>
+        <div class="dash-seg seg-pie">
+          <div class="seg-label">用例整体成功情况</div>
+          <div id="chart-cases" class="chart-mid"></div>
+          <div class="chart-legend-note" id="chart-note"></div>
+        </div>
+        <div class="dash-seg seg-bar">
+          <div class="seg-label">最近三天成功 / 失败</div>
+          <div id="chart-rate" class="chart-mid"></div>
+          <div class="chart-legend-note">
+            <span class="lg"><i style="background:${"#178a50"}"></i>成功次数</span>
+            <span class="lg"><i style="background:${"#d64545"}"></i>失败次数</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">按模块 · 按成功率由低到高</div>
+      <div class="mod-list">
+        ${mods.map(m => `
+          <div class="mod-row">
+            <div class="mod-head">
+              <span class="mod-name" title="${esc(m.package)}">${esc(pkgShort(m.package))}</span>
+              <span class="mod-meta">
+                ${m.total} 个用例${m.ran ? ` · 已执行 ${m.ran}` : " · 未执行"}
+              </span>
+              <span class="mod-pct ${m.passRate === null ? "none"
+                    : m.passRate >= 80 ? "good" : m.passRate >= 50 ? "mid" : "bad"}">
+                ${m.passRate === null ? "—" : m.passRate + "%"}
+              </span>
+            </div>
+            <div class="progress">
+              <div class="progress-fill pass" style="width:${m.ran ? (m.pass || 0) / m.ran * 100 : 0}%"></div>
+              <div class="progress-fill fail" style="width:${m.ran ? (m.fail || 0) / m.ran * 100 : 0}%"></div>
+              <div class="progress-fill blocked" style="width:${m.ran ? (m.blocked || 0) / m.ran * 100 : 0}%"></div>
+            </div>
+            <div class="mod-legend">
+              <span class="lg"><i style="background:${"#178a50"}"></i>成功 ${m.pass || 0}</span>
+              <span class="lg"><i style="background:${"#d64545"}"></i>失败 ${m.fail || 0}</span>
+              <span class="lg"><i style="background:${"#8250df"}"></i>阻断 ${m.blocked || 0}</span>
+            </div>
+          </div>`).join("") || "<div class='muted'>暂无用例</div>"}
+      </div>
+    </div>`;
+
+  if (!window.echarts) {
+    $("#chart-cases").innerHTML = "<div class='muted'>echarts.min.js 未加载</div>";
+    return;
+  }
+  const C = { pass: "#178a50", fail: "#d64545", blocked: "#8250df", other: "#b9c0cf" };
+
+  // ① 环形图：用例整体成功情况
+  const pie = [
+    { name: "成功", value: pass, itemStyle: { color: C.pass } },
+    { name: "失败", value: fail, itemStyle: { color: C.fail } },
+    { name: "阻断", value: blocked, itemStyle: { color: C.blocked } },
+    { name: "未执行", value: neverRun, itemStyle: { color: C.other } },
+  ].filter(x => x.value > 0);
+  const c1 = echarts.init($("#chart-cases"));
+  c1.setOption({
+    tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
+    series: [{
+      type: "pie", radius: ["48%", "72%"], center: ["50%", "50%"],
+      label: { show: true, formatter: "{b}\n{c}", fontSize: 11, lineHeight: 15 },
+      labelLine: { length: 8, length2: 8 },
+      data: pie.length ? pie : [{ name: "无用例", value: 1, itemStyle: { color: C.other } }],
+    }],
+  });
+  dashCharts.push(c1);
+  $("#chart-note").innerHTML = `
+    <span class="lg"><i style="background:${C.pass}"></i>成功 ${pass}</span>
+    <span class="lg"><i style="background:${C.fail}"></i>失败 ${fail}</span>
+    <span class="lg"><i style="background:${C.blocked}"></i>阻断 ${blocked}</span>
+    <span class="lg"><i style="background:${C.other}"></i>未执行 ${neverRun}</span>
+    <span class="lg total">整体成功率 ${runPct}%</span>`;
+
+  // ② 柱状图：最近三天成功 / 失败次数（横轴=日期，悬停显示成功/失败/成功率）
+  const c2 = echarts.init($("#chart-rate"));
+  c2.setOption({
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      formatter: ps => {
+        const x = chartDays[ps[0].dataIndex];
+        const tot = x.total;
+        const rate = tot ? Math.round(x.pass / tot * 100) : 0;
+        const line = (label, val, color) =>
+          `<div style="display:flex;align-items:center;gap:6px">
+             <i style="width:9px;height:9px;border-radius:2px;background:${color};display:inline-block"></i>
+             <span style="flex:1">${label}</span><b>${val}</b></div>`;
+        return `<div style="min-width:150px">
+            <div style="font-weight:600;margin-bottom:6px">${x.date}　${x.label}</div>
+            ${line("成功", x.pass, C.pass)}
+            ${line("失败", x.fail, C.fail)}
+            ${x.blocked ? line("阻断", x.blocked, C.blocked) : ""}
+            <div style="border-top:1px solid #e6e9ef;margin:6px 0 4px"></div>
+            <div style="display:flex;gap:6px"><span style="flex:1">执行总数</span><b>${tot}</b></div>
+            <div style="display:flex;gap:6px"><span style="flex:1">成功率</span><b>${rate}%</b></div>
+          </div>`;
+      },
+    },
+    grid: { left: 40, right: 16, top: 20, bottom: 28 },
+    xAxis: {
+      type: "category",
+      data: chartDays.map(x => x.date),
+      axisLabel: { fontSize: 11, color: "#737b90" },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value", minInterval: 1,
+      axisLabel: { fontSize: 11, color: "#737b90" },
+      splitLine: { lineStyle: { color: "#eef0f4" } },
+    },
+    series: [
+      { name: "成功", type: "bar", barMaxWidth: 22, barGap: "10%",
+        itemStyle: { color: C.pass, borderRadius: [4, 4, 0, 0] },
+        label: { show: true, position: "top", fontSize: 11, color: "#737b90" },
+        data: chartDays.map(x => x.pass) },
+      { name: "失败", type: "bar", barMaxWidth: 22,
+        itemStyle: { color: C.fail, borderRadius: [4, 4, 0, 0] },
+        label: { show: true, position: "top", fontSize: 11, color: "#737b90" },
+        data: chartDays.map(x => x.fail) },
+    ],
+  });
+  dashCharts.push(c2);
+
+  if (!viewDashboard._resizeBound) {
+    viewDashboard._resizeBound = true;
+    window.addEventListener("resize", () =>
+      dashCharts.forEach(c => { try { c.resize(); } catch {} }));
+  }
+}
+
+// ══════════════════ 测试记录 ══════════════════
+async function viewSessions() {
+  activateNav("sessions");
+  main.innerHTML = "<div class='sub'>加载中…</div>";
+  const { sessions, kinds } = await api("/api/sessions" + (showDiag ? "?all=1" : ""));
+  const diagN = (kinds && kinds.diag) || 0;
+  const testN = (kinds && kinds.test) || 0;
+
+  main.innerHTML = `
+    <h1>测试记录</h1>
+    <div class="sub">AI 直操测试的执行记录：点标题查看每一步的工具调用、截图证据与断言</div>
+    <div class="lib-toolbar">
+      <div class="sub" style="margin:0">正式测试 <b>${testN}</b> 条${diagN ? ` · 验证/调试 <b>${diagN}</b> 条（默认不显示）` : ""}</div>
+      <span style="flex:1"></span>
+      ${diagN ? `<label class="chk"><input type="checkbox" id="show-diag"${showDiag ? " checked" : ""}>显示验证记录</label>` : ""}
+    </div>
+    <div class="list-table recs">
+      <div class="lt-head">
+        <span class="c-id">#</span>
+        <span class="c-title">标题</span>
+        <span class="c-status">结论</span>
+        <span class="c-pkg">模块</span>
+        <span class="c-start">开始时间</span>
+        <span class="c-dur">耗时</span>
+        <span class="c-cnt">事件/断言</span>
+        <span class="c-act">操作</span>
+      </div>
+      ${sessions.map(s => `
+        <div class="lt-row${s.kind === "diag" ? " diag" : ""}" data-id="${s.id}">
+          <span class="c-id">${s.id}</span>
+          <span class="c-title">
+            ${s.kind === "diag" ? '<span class="tag-diag">验证</span>' : ""}
+            <a class="row-link" data-id="${s.id}">${esc(s.title || `会话 #${s.id}`)}</a>
+          </span>
+          <span class="c-status">${statusChip(s.status)}</span>
+          <span class="c-pkg" title="${esc(s.package || "")}">${esc(pkgShort(s.package))}</span>
+          <span class="c-start">${esc(fmtTime(s.started_at))}</span>
+          <span class="c-dur">${fmtDuration(s.duration_seconds)}</span>
+          <span class="c-cnt">${s.event_count} / ${s.finding_count}</span>
+          <span class="c-act">
+            <button class="ghost sm danger" data-del="${s.id}" title="删除该记录及其截图/日志">删除</button>
+          </span>
+        </div>`).join("") || "<div class='lt-empty'>还没有记录。用 <code>session.py start</code> 开启会话后由 AI 执行用例。</div>"}
+    </div>`;
+
+  const cb = $("#show-diag");
+  if (cb) cb.addEventListener("change", () => { showDiag = cb.checked; viewSessions(); });
+  $$(".row-link", main).forEach(el =>
+    el.addEventListener("click", () => viewSession(el.dataset.id)));
+  $$("[data-del]", main).forEach(el =>
+    el.addEventListener("click", ev => {
+      ev.stopPropagation();          // 不能触发"点击查看"
+      confirmDeleteSession(el.dataset.del);
+    }));
+}
+
+function confirmDeleteSession(id) {
+  const m = modal("删除测试记录", `
+    <div class="warn-text">确定删除记录 <b>#${esc(id)}</b> 吗？</div>
+    <div class="meta">将同时删除该记录的事件流、断言，以及<b>磁盘上的截图与日志证据</b>，<b>不可恢复</b>。
+    被测 App 本身不受影响。</div>
+    <label class="chk" style="margin-top:10px">
+      <input type="checkbox" id="del-ev" checked> 同时删除截图 / 日志文件
+    </label>`,
+    `<button class="ghost" data-cancel>取消</button>
+     <button class="danger" data-ok>确认删除</button>`);
+  $("[data-cancel]", m.el).addEventListener("click", m.close);
+  $("[data-ok]", m.el).addEventListener("click", async () => {
+    const withEv = $("#del-ev", m.el).checked;
+    const r = await api(`/api/sessions/${id}?evidence=${withEv ? 1 : 0}`,
+                        { method: "DELETE" });
+    m.close();
+    await viewSessions();
+    if (r && r.files != null) {
+      toast(`已删除记录 #${id}${withEv ? `，清理 ${r.files} 个证据文件` : ""}`);
+    }
+  });
+}
+
+/* 轻量提示条（操作反馈） */
+function toast(msg) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+async function viewSession(id) {
+  main.innerHTML = "<div class='sub'>加载中…</div>";
+  const s = await api(`/api/sessions/${id}`);
+  const kindLabel = { observe: "👁 观察", act: "✋ 操作", read: "🔍 读取",
+                      ask: "❓ 问人", pause: "⏸ 暂停", note: "📝 备注",
+                      state: "⚙️ 状态", logcat: "📎 取证", crash: "💥 崩溃" };
+
+  // 相邻事件时间差 = AI 决策耗时；事件自身 duration_ms = 工具执行耗时
+  const ts = e => Date.parse(e.created_at);
+  let prev = null;
+  const gaps = {};
+  for (const e of s.events) {
+    if (prev !== null && !isNaN(ts(e)) && !isNaN(ts(prev)))
+      gaps[e.seq] = Math.max(0, (ts(e) - ts(prev)) / 1000);
+    prev = e;
+  }
+  const getAct = e => { try { return (JSON.parse(e.data_json || "{}").action) || {}; } catch { return {}; } };
+  const getCrash = e => {
+    try {
+      const c = JSON.parse(e.data_json || "{}").crash;
+      return c && c.scope ? c : null;
+    } catch { return null; }
+  };
+  const scopeLabel = { target: "被测包", related: "关联包", other: "其他包" };
+  const fmtGap = sec => sec >= 60 ? `${Math.floor(sec / 60)}m${Math.round(sec % 60)}s` : `${sec.toFixed(1)}s`;
+
+  main.innerHTML = `
+    <button class="ghost back">← 返回列表</button>
+    <div class="detail-head">
+      <h1>${esc(s.title || `会话 #${s.id}`)} ${statusChip(s.status)}</h1>
+      <div class="meta">模块 ${esc(s.package || "—")} · 设备 ${esc(s.device || "—")} ·
+        开始 ${esc(fmtTime(s.started_at))} → 结束 ${esc(fmtTime(s.finished_at))} · 耗时 ${fmtDuration(s.duration_seconds)}</div>
+      ${s.user_input ? `<div class="quote">用例口述：${esc(s.user_input)}</div>` : ""}
+      <div class="findings">
+        ${s.findings.map(f => `
+          <div class="finding">${statusChip(f.status)}
+            ${f.expect ? `<b>期望</b>${esc(f.expect)}` : ""}
+            ${f.actual ? `<span class="small">　实际：${esc(f.actual)}</span>` : ""}
+            ${f.note ? `<div class="small">${esc(f.note)}</div>` : ""}
+          </div>`).join("") || "<span class='muted'>无断言记录</span>"}
+      </div>
+    </div>
+    <div class="final-result">
+      <span class="final-label">最终结果</span>${statusChip(s.status)}
+      <span class="final-summary">${esc(s.summary || (s.status === "running" ? "执行中…" : "未写结论"))}</span>
+    </div>
+    <h1 style="font-size:16px;margin:18px 0 12px">执行时间线</h1>
+    <div class="timeline">
+      ${s.events.map(e => {
+        const act = getAct(e);
+        const why = act.why || null;
+        return `
+        <div class="event ${esc(e.kind)}">
+          <div class="event-head">
+            <span class="event-tool">${kindLabel[e.kind] || esc(e.kind)} · ${esc(e.tool || "")}</span>
+            ${e.duration_ms != null ? `<span class="metric">执行 ${fmtDuration(e.duration_ms / 1000)}</span>` : ""}
+            ${gaps[e.seq] != null ? `<span class="metric">决策间隔 ${fmtGap(gaps[e.seq])}</span>` : ""}
+            <span class="event-ts">#${e.seq} ${esc(fmtTime(e.started_at || e.created_at))}</span>
+          </div>
+          ${e.detail ? `<div class="event-detail">${esc(e.detail)}</div>` : ""}
+          ${(() => {
+            const c = getCrash(e);
+            if (!c) return "";
+            return `<div class="crash-box ${esc(c.scope)}">
+              ⚠️ ${scopeLabel[c.scope] || c.scope} ${esc(c.type || "CRASH")} · ${esc(c.process || "?")}
+              ${c.time ? `· ${esc(c.time)}` : ""}
+              ${c.log_path ? ` · <a href="/files/${esc(c.log_path)}" target="_blank">崩溃前20s日志</a>` : "（无日志）"}
+            </div>`;
+          })()}
+          ${why ? `<div class="why">理由：${esc(why)}</div>` : ""}
+          ${(() => {
+            const ev = e.evidence;
+            if (!ev) return "";
+            if (ev.endsWith(".png") || ev.endsWith(".jpg") || ev.endsWith(".jpeg"))
+              return `<img class="shot" loading="lazy" src="/files/${esc(ev)}">`;
+            const name = ev.split("/").pop();
+            const dl = e.kind === "logcat" || ev.endsWith(".log");
+            return `<div class="ev-file">📎 <a href="/files/${esc(ev)}"
+              target="_blank"${dl ? " download" : ""}>${esc(name)}</a></div>`;
+          })()}
+        </div>`;
+      }).join("") || "<span class='muted'>无事件</span>"}
+    </div>`;
+  $(".back", main).addEventListener("click", viewSessions);
+  $$("img.shot", main).forEach(img =>
+    img.addEventListener("click", () => {
+      $("#lightbox-img").src = img.src;
+      $("#lightbox").classList.remove("hidden");
+    }));
+}
+
+$("#lightbox").addEventListener("click", () => $("#lightbox").classList.add("hidden"));
+
+// ══════════════════ 用例库 ══════════════════
+async function viewCaseLib() {
+  activateNav("cases");
+  main.innerHTML = "<div class='sub'>加载中…</div>";
+  const [{ items }, { modules }] = await Promise.all([
+    api("/api/cases"), api("/api/modules"),
+  ]);
+
+  // 按模块（包名）分类；用例自身的 package 优先，缺失归「未识别」
+  const grpOf = c => c.package || "未识别";
+  const groups = new Map();
+  for (const c of items) {
+    const g = grpOf(c);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(c);
+  }
+  const groupNames = [...groups.keys()].sort();
+  if (caseFilter !== "all" && !groups.has(caseFilter)) caseFilter = "all";
+  const shown = caseFilter === "all" ? items : (groups.get(caseFilter) || []);
+
+  const tabs = `
+    <div class="tabs">
+      <span class="tab ${caseFilter === "all" ? "on" : ""}" data-g="all">全部 ${items.length}</span>
+      ${groupNames.map(g => `
+        <span class="tab ${caseFilter === g ? "on" : ""}" data-g="${esc(g)}">
+          ${esc(pkgShort(g))} ${groups.get(g).length}</span>`).join("")}
+    </div>`;
+
+  main.innerHTML = `
+    <h1>用例库</h1>
+    <div class="sub">正式用例（用户口述原文）。复跑 <code>session.py start --case &lt;id&gt;</code>，无需重复输入。</div>
+    <div class="lib-toolbar">
+      ${tabs}
+      <span style="flex:1"></span>
+      <button id="case-add">+ 添加用例</button>
+    </div>
+    <div class="list-table">
+      <div class="lt-head">
+        <span class="c-id">#</span>
+        <span class="c-title">用例标题</span>
+        <span class="c-pkg">模块</span>
+        <span class="c-status">最近结论</span>
+        <span class="c-run">跑过</span>
+        <span class="c-start">最近运行</span>
+        <span class="c-act">操作</span>
+      </div>
+      ${shown.map(c => `
+        <div class="lt-row" data-id="${c.id}">
+          <span class="c-id">${c.id}</span>
+          <span class="c-title"><a class="row-link" data-id="${c.id}">${esc(c.title || "(无标题)")}</a></span>
+          <span class="c-pkg" title="${esc(c.package || "")}">${esc(pkgShort(grpOf(c)))}</span>
+          <span class="c-status">${statusChip(c.last_status) || "<span class='muted'>未执行</span>"}</span>
+          <span class="c-run">${c.run_count ?? 0} 次</span>
+          <span class="c-start">${esc(fmtTime(c.last_run_at))}</span>
+          <span class="c-act">
+            <button class="ghost sm" data-edit="${c.id}">修改</button>
+            <button class="ghost sm danger" data-del="${c.id}">删除</button>
+          </span>
+        </div>`).join("") || "<div class='lt-empty'>该分类下暂无用例。跑完一次会话后用 <code>session.py case save --session &lt;id&gt;</code> 提升。</div>"}
+    </div>`;
+
+  $$(".tab", main).forEach(el =>
+    el.addEventListener("click", () => { caseFilter = el.dataset.g; viewCaseLib(); }));
+  $$(".row-link", main).forEach(el =>
+    el.addEventListener("click", () => openCaseView(el.dataset.id)));
+  $$("[data-edit]", main).forEach(el =>
+    el.addEventListener("click", () => openCaseEdit(el.dataset.edit)));
+  $$("[data-del]", main).forEach(el =>
+    el.addEventListener("click", () => confirmDeleteCase(el.dataset.del)));
+  $("#case-add").addEventListener("click", openCaseAdd);
+}
+
+function openCaseAdd() {
+  const m = modal("添加用例", `
+    <label class="fld">标题
+      <input id="ca-title" placeholder="如 联想日历_168_图库导入入口"></label>
+    <label class="fld">模块（包名）
+      <input id="ca-pkg" placeholder="如 com.zui.calendar"></label>
+    <label class="fld">用例原文（口述的步骤 + 预期）
+      <textarea id="ca-input" spellcheck="false"
+        placeholder="前提：...&#10;操作步骤：&#10;1. ...&#10;预期结果：&#10;1. ..."></textarea></label>
+    <div class="meta" id="ca-state"></div>`,
+    `<button class="ghost" data-cancel>取消</button>
+     <button data-ok>添加</button>`);
+  $("[data-cancel]", m.el).addEventListener("click", m.close);
+  $("[data-ok]", m.el).addEventListener("click", async () => {
+    const st = $("#ca-state", m.el);
+    st.textContent = "保存中…";
+    try {
+      await api("/api/cases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: $("#ca-title", m.el).value,
+          package: $("#ca-pkg", m.el).value,
+          input: $("#ca-input", m.el).value,
+        }),
+      });
+      m.close();
+      viewCaseLib();
+    } catch (e) {
+      st.textContent = "保存失败：" + e.message;
+    }
+  });
+}
+
+async function openCaseView(id) {
+  const c = await api(`/api/cases/${id}`);
+  const m = modal(`用例 #${c.id} · ${c.title || ""}`, `
+    <div class="meta" style="margin-bottom:8px">
+      模块 ${esc(c.package || "未识别")} · 跑过 ${c.run_count ?? 0} 次 ·
+      最近 ${esc(fmtTime(c.last_run_at))} ${statusChip(c.last_status)} ·
+      关联记录 ${c.last_session_id ? "#" + c.last_session_id : "—"}
+    </div>
+    <div class="panel-title">用例原文</div>
+    <pre class="case-pre">${esc(c.input || "(空)")}</pre>`,
+    `<button class="ghost" data-cancel>关闭</button>
+     <button data-edit>修改</button>`);
+  $("[data-cancel]", m.el).addEventListener("click", m.close);
+  $("[data-edit]", m.el).addEventListener("click", () => {
+    m.close();
+    openCaseEdit(id);
+  });
+}
+
+async function openCaseEdit(id) {
+  const c = await api(`/api/cases/${id}`);
+  const m = modal(`修改用例 #${c.id}`, `
+    <label class="fld">标题
+      <input id="ce-title" value="${esc(c.title || "")}"></label>
+    <label class="fld">模块（包名）
+      <input id="ce-pkg" placeholder="如 com.zui.calendar"
+             value="${esc(c.package || "")}"></label>
+    <label class="fld">用例原文
+      <textarea id="ce-input" spellcheck="false">${esc(c.input || "")}</textarea></label>
+    <div class="meta" id="ce-state"></div>`,
+    `<button class="ghost" data-cancel>取消</button>
+     <button data-ok>保存</button>`);
+  $("[data-cancel]", m.el).addEventListener("click", m.close);
+  $("[data-ok]", m.el).addEventListener("click", async () => {
+    $("#ce-state", m.el).textContent = "保存中…";
+    await api(`/api/cases/${id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: $("#ce-title", m.el).value,
+        package: $("#ce-pkg", m.el).value,
+        input: $("#ce-input", m.el).value,
+      }),
+    });
+    m.close();
+    viewCaseLib();
+  });
+}
+
+function confirmDeleteCase(id) {
+  const m = modal("删除用例", `
+    <div class="warn-text">确定删除用例 <b>#${esc(id)}</b> 吗？</div>
+    <div class="meta">历史测试记录会保留（仅解除关联），<b>不可恢复</b>。</div>`,
+    `<button class="ghost" data-cancel>取消</button>
+     <button class="danger" data-ok>确认删除</button>`);
+  $("[data-cancel]", m.el).addEventListener("click", m.close);
+  $("[data-ok]", m.el).addEventListener("click", async () => {
+    await api(`/api/cases/${id}`, { method: "DELETE" });
+    m.close();
+    viewCaseLib();
+  });
+}
+
+// ══════════════════ 视觉模型 ══════════════════
+async function viewVision() {
+  activateNav("vision");
+  const c = await api("/api/vision");
+  main.innerHTML = `
+    <h1>视觉模型</h1>
+    <div class="sub">可选的视觉通道：配置 OpenAI 兼容的多模态模型（vision.py 消费），
+    供工具级视觉断言使用。v2 默认由 AI 自身判图，此通道用于批量回放等无对话场景。</div>
+    <div class="card" style="max-width:620px;cursor:default">
+      <div class="kb-bar">
+        <b>OpenAI 兼容配置</b>
+        <span style="flex:1"></span>
+        <span class="muted" id="vs-state"></span>
+        <button class="ghost" id="vs-test">测试连接</button>
+        <button id="vs-save">保存</button>
+      </div>
+      <div class="form">
+        <label>Base URL<input id="vs-url" placeholder="https://api.example.com/v1" value="${esc(c.base_url || "")}"></label>
+        <label>Model<input id="vs-model" placeholder="gpt-4o / qwen-vl-max / glm-4v ..." value="${esc(c.model || "")}"></label>
+        <label>API Key<input id="vs-key" type="password" placeholder="${esc(c.api_key_masked || "未配置")}" value=""></label>
+        <div class="meta">Key 只显示掩码；留空保存则保留原值。配置文件：storage/vision.json（不入库）。</div>
+      </div>
+      <div id="vs-result"></div>
+    </div>`;
+
+  $("#vs-save").addEventListener("click", async () => {
+    const btn = $("#vs-save");
+    btn.disabled = true;
+    $("#vs-state").textContent = "保存中…";
+    await api("/api/vision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        base_url: $("#vs-url").value,
+        model: $("#vs-model").value,
+        api_key: $("#vs-key").value,
+      }),
+    });
+    $("#vs-key").value = "";
+    $("#vs-state").textContent = "已保存 " + fmtTime(new Date().toISOString());
+    btn.disabled = false;
+  });
+
+  // 测试连接：先保存当前表单（否则测的是旧配置），再用后端的真实请求验证
+  $("#vs-test").addEventListener("click", async () => {
+    const btn = $("#vs-test");
+    btn.disabled = true;
+    const box = $("#vs-result");
+    box.innerHTML = `<div class="test-box pending">⏳ 正在用当前配置发起一次真实请求（最多 30s）…</div>`;
+    try {
+      await api("/api/vision", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          base_url: $("#vs-url").value,
+          model: $("#vs-model").value,
+          api_key: $("#vs-key").value,
+        }),
+      });
+      const r = await api("/api/vision/test", { method: "POST" });
+      if (r.ok) {
+        box.innerHTML = `<div class="test-box ok">
+          ✅ <b>连接成功</b> · 耗时 ${r.latency_ms}ms · 模型 <code>${esc(r.model)}</code>
+          <div class="meta">模型回复：${esc(r.reply || "(空)")}</div>
+          ${r.usage ? `<div class="meta">tokens: ${esc(JSON.stringify(r.usage))}</div>` : ""}
+        </div>`;
+      } else {
+        box.innerHTML = `<div class="test-box err">
+          ❌ <b>连接失败</b>：${esc(r.error || "未知错误")}
+          ${r.detail ? `<div class="meta">响应：${esc(r.detail)}</div>` : ""}
+          ${r.hint ? `<div class="meta">💡 ${esc(r.hint)}</div>` : ""}
+        </div>`;
+      }
+    } catch (e) {
+      box.innerHTML = `<div class="test-box err">❌ 请求异常：${esc(e.message)}</div>`;
+    }
+    btn.disabled = false;
+  });
+}
+
+// ══════════════════ 知识库 ══════════════════
+async function viewKnowledge(name) {
+  activateNav("knowledge");
+  main.innerHTML = "<div class='sub'>加载中…</div>";
+  const { items } = await api("/api/knowledge");
+  if (!kbCurrent && items.length) kbCurrent = name || items[0].name;
+  let editor = "";
+  if (kbCurrent) {
+    const { content } = await api(`/api/knowledge/${encodeURIComponent(kbCurrent)}`);
+    editor = `
+      <div class="kb-editor">
+        <div class="kb-bar">
+          <b>${esc(kbCurrent)}</b>
+          <span style="flex:1"></span>
+          <span class="muted" id="kb-state"></span>
+          <button id="kb-save">保存</button>
+        </div>
+        <textarea id="kb-text" spellcheck="false">${esc(content)}</textarea>
+      </div>`;
+  }
+  main.innerHTML = `
+    <h1>知识库</h1>
+    <div class="sub">App 操作经验（Markdown）。AI 探索后回写，人可在此直接修订。</div>
+    <div class="kb">
+      <div class="kb-list">
+        ${items.map(i => `
+          <div class="card" data-name="${esc(i.name)}" style="${i.name === kbCurrent ? "border-color:var(--accent)" : ""}">
+            <div class="title" style="font-size:13.5px">${esc(i.name)}</div>
+            <div class="meta">${i.size} 字节 · ${esc(fmtTime(i.mtime))}</div>
+          </div>`).join("")}
+      </div>
+      ${editor}
+    </div>`;
+  $$(".kb-list .card", main).forEach(el =>
+    el.addEventListener("click", () => { kbCurrent = el.dataset.name; viewKnowledge(); }));
+  const ta = $("#kb-text");
+  if (ta) {
+    $("#kb-save").addEventListener("click", async () => {
+      const btn = $("#kb-save");
+      btn.disabled = true;
+      $("#kb-state").textContent = "保存中…";
+      await api(`/api/knowledge/${encodeURIComponent(kbCurrent)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: ta.value }),
+      });
+      $("#kb-state").textContent = "已保存 " + fmtTime(new Date().toISOString());
+      btn.disabled = false;
+    });
+  }
+}
+
+activateNav("dashboard");
+viewDashboard();

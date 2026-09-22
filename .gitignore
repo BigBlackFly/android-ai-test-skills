@@ -1,0 +1,10 @@
+__pycache__/
+.venv/
+storage/evidence/
+storage/logs/
+storage/sessions.db*
+storage/.crash_seen_*
+storage/.evidence_seq
+storage/vision.json
+storage/_smoke_*
+*.pyc
