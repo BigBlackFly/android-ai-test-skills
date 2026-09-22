@@ -61,6 +61,16 @@ const pkgShort = p => {
   return parts.length > 2 ? parts.slice(-2).join(".") : p;
 };
 
+// 成功率 4 段配色：≥90 优秀(绿) / ≥70 良好(蓝绿) / ≥50 偏低(橙) / <50 差(红)
+// total=0（还没有用例）时不评级，走默认色。
+const rateLevel = (pct, total) => {
+  if (!total) return "";
+  if (pct >= 90) return "lv-a";
+  if (pct >= 70) return "lv-b";
+  if (pct >= 50) return "lv-c";
+  return "lv-d";
+};
+
 // ── 通用弹窗 ──
 function modal(title, bodyHTML, footerHTML = "") {
   const el = document.createElement("div");
@@ -146,13 +156,13 @@ async function viewDashboard() {
 
   main.innerHTML = `
     <h1>仪表盘</h1>
-    <div class="sub">用例资产与执行结果总览</div>
 
     <div class="panel">
       <div class="dash-top">
         <div class="dash-seg seg-count">
           <div class="seg-label">用例总数</div>
           <div class="big-num">${total}</div>
+          <div class="big-rate ${rateLevel(runPct, total)}">整体成功率 <b>${runPct}%</b></div>
         </div>
         <div class="dash-seg seg-pie">
           <div class="seg-label">用例整体成功情况</div>
@@ -162,10 +172,6 @@ async function viewDashboard() {
         <div class="dash-seg seg-bar">
           <div class="seg-label">最近三天成功 / 失败</div>
           <div id="chart-rate" class="chart-mid"></div>
-          <div class="chart-legend-note">
-            <span class="lg"><i style="background:${"#178a50"}"></i>成功次数</span>
-            <span class="lg"><i style="background:${"#d64545"}"></i>失败次数</span>
-          </div>
         </div>
       </div>
     </div>
@@ -216,8 +222,8 @@ async function viewDashboard() {
   c1.setOption({
     tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
     series: [{
-      type: "pie", radius: ["48%", "72%"], center: ["50%", "50%"],
-      label: { show: true, formatter: "{b}\n{c}", fontSize: 11, lineHeight: 15 },
+      type: "pie", radius: ["52%", "76%"], center: ["50%", "50%"],
+      label: { show: true, formatter: "{b}\n{c}", fontSize: 13, lineHeight: 17 },
       labelLine: { length: 8, length2: 8 },
       data: pie.length ? pie : [{ name: "无用例", value: 1, itemStyle: { color: C.other } }],
     }],
@@ -227,11 +233,19 @@ async function viewDashboard() {
     <span class="lg"><i style="background:${C.pass}"></i>成功 ${pass}</span>
     <span class="lg"><i style="background:${C.fail}"></i>失败 ${fail}</span>
     <span class="lg"><i style="background:${C.blocked}"></i>阻断 ${blocked}</span>
-    <span class="lg"><i style="background:${C.other}"></i>未执行 ${neverRun}</span>
-    <span class="lg total">整体成功率 ${runPct}%</span>`;
+    <span class="lg"><i style="background:${C.other}"></i>未执行 ${neverRun}</span>`;
 
   // ② 柱状图：最近三天成功 / 失败次数（横轴=日期，悬停显示成功/失败/成功率）
   const c2 = echarts.init($("#chart-rate"));
+  // 纵坐标只标 3 档：0 / 平均值 / 平均值×2。
+  // 平均值 = 近三天「成功+失败」次数的均值。
+  // ⚠️ 但取 max(平均值×2, 各天最大值)：否则某天柱子会顶出坐标轴外面（截断）。
+  //    例：数据 6/0/0 → 平均值 2，严格按 0/2/4 会截断，故抬到 0/3/6。
+  const dayTotals = chartDays.map(x => (x.pass || 0) + (x.fail || 0));
+  const avg = dayTotals.length
+    ? dayTotals.reduce((a, b) => a + b, 0) / dayTotals.length : 0;
+  const avgTick = Math.max(1, Math.round(avg));
+  const yMax = Math.max(avgTick * 2, ...dayTotals, 1);
   c2.setOption({
     tooltip: {
       trigger: "axis",
@@ -255,26 +269,28 @@ async function viewDashboard() {
           </div>`;
       },
     },
-    grid: { left: 40, right: 16, top: 20, bottom: 28 },
+    grid: { left: 46, right: 18, top: 24, bottom: 30 },
     xAxis: {
       type: "category",
       data: chartDays.map(x => x.date),
-      axisLabel: { fontSize: 11, color: "#737b90" },
+      axisLabel: { fontSize: 12, color: "#737b90" },
       axisTick: { show: false },
     },
     yAxis: {
-      type: "value", minInterval: 1,
-      axisLabel: { fontSize: 11, color: "#737b90" },
+      type: "value",
+      max: yMax,
+      interval: yMax / 2,          // 只出 0 / 平均值 / 平均值×2 三档
+      axisLabel: { fontSize: 12, color: "#737b90" },
       splitLine: { lineStyle: { color: "#eef0f4" } },
     },
     series: [
-      { name: "成功", type: "bar", barMaxWidth: 22, barGap: "10%",
+      { name: "成功", type: "bar", barMaxWidth: 46, barGap: "10%",
         itemStyle: { color: C.pass, borderRadius: [4, 4, 0, 0] },
-        label: { show: true, position: "top", fontSize: 11, color: "#737b90" },
+        label: { show: true, position: "top", fontSize: 14, color: "#737b90" },
         data: chartDays.map(x => x.pass) },
-      { name: "失败", type: "bar", barMaxWidth: 22,
+      { name: "失败", type: "bar", barMaxWidth: 46,
         itemStyle: { color: C.fail, borderRadius: [4, 4, 0, 0] },
-        label: { show: true, position: "top", fontSize: 11, color: "#737b90" },
+        label: { show: true, position: "top", fontSize: 14, color: "#737b90" },
         data: chartDays.map(x => x.fail) },
     ],
   });
@@ -297,7 +313,6 @@ async function viewSessions() {
 
   main.innerHTML = `
     <h1>测试记录</h1>
-    <div class="sub">AI 直操测试的执行记录：点标题查看每一步的工具调用、截图证据与断言</div>
     <div class="lib-toolbar">
       <div class="sub" style="margin:0">正式测试 <b>${testN}</b> 条${diagN ? ` · 验证/调试 <b>${diagN}</b> 条（默认不显示）` : ""}</div>
       <span style="flex:1"></span>
@@ -498,7 +513,6 @@ async function viewCaseLib() {
 
   main.innerHTML = `
     <h1>用例库</h1>
-    <div class="sub">正式用例（用户口述原文）。复跑 <code>session.py start --case &lt;id&gt;</code>，无需重复输入。</div>
     <div class="lib-toolbar">
       ${tabs}
       <span style="flex:1"></span>
@@ -643,8 +657,6 @@ async function viewVision() {
   const c = await api("/api/vision");
   main.innerHTML = `
     <h1>视觉模型</h1>
-    <div class="sub">可选的视觉通道：配置 OpenAI 兼容的多模态模型（vision.py 消费），
-    供工具级视觉断言使用。v2 默认由 AI 自身判图，此通道用于批量回放等无对话场景。</div>
     <div class="card" style="max-width:620px;cursor:default">
       <div class="kb-bar">
         <b>OpenAI 兼容配置</b>
@@ -739,7 +751,6 @@ async function viewKnowledge(name) {
   }
   main.innerHTML = `
     <h1>知识库</h1>
-    <div class="sub">App 操作经验（Markdown）。AI 探索后回写，人可在此直接修订。</div>
     <div class="kb">
       <div class="kb-list">
         ${items.map(i => `

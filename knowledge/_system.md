@@ -8,12 +8,23 @@
 - 适用包名: `com.android.permissioncontroller`、`com.google.android.permissioncontroller`、
   `com.android.systemui`、`android`
 
-## 权限弹窗-响应机制
+## 权限弹窗-多权限申请：同一个框，点一次换下一个
+
+一次申请**多个**权限时，Android **不会**关掉再弹新框 ——
+就着同一个弹窗，点一次「允许」后**框内换成下一个权限**继续问，直到全部问完才关闭。
+
+**所以：看见权限框就点允许，一直点到框消失。** 不用关心有几个、分别是什么。
+（默认同意已经这么做了；要测「拒绝」才用 `--perm-action deny` 声明。）
+
+> 实现注意：判"是否卡住"**不能**用按钮文本或 activity —— 多权限时它们全都一样。
+> 要看**框内申请文案**是否变化：变了=推进到下一个，没变=真点不动。
+
+## 权限-响应机制
 
 **默认同意，需要拒绝时显式声明**：
 
 ```powershell
-# 默认：遇到权限弹窗自动点「允许」，不用声明任何东西
+# 默认：遇到权限弹窗自动点「允许」，多权限会连续点到框消失
 python act.py tap --x ... --via "rid=btn_import"
 
 # 要测「拒绝」路径时才声明
@@ -26,7 +37,7 @@ python session.py perm-intent --clear          # 分支测完清除
 - deny **只点「拒绝」**，绝不点「拒绝并不再询问」（会设 don't-ask-again，
   导致后续"授予"分支弹窗永不再出现）
 - 「选择照片」（部分媒体）、「前往设置」**不自动点**，交回 AI 判断
-- 返回里看 `permission.detected / handled / clicks / unmatched`
+- 返回里看 `permission.detected / handled / clicks / prompts / unmatched`
 
 > **系统权限框约 6 秒未点击会自动消失**（Android 通用机制）。
 > 所以**不要**用"点一下 → observe 看看 → 再决定点哪"的节奏：一次 observe 就吃掉整个窗口。

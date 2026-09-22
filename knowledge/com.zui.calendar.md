@@ -18,16 +18,13 @@
 1. **App 权限说明框**「日历需要使用以下权限」（必要/可选分组 + 退出/同意）
    - 标题 rid `alertTitle`，同意 = `android:id/button1`
    - ⚠️ 一命中就点会**点空**（入场动画未结束）：等约 1.5s 再点，点完核对框已消失
-2. **系统通知权限框**「日历正在尝试显示通知」
-   - rid `com.android.permissioncontroller:id/permission_allow_button_two`
-   - **不在 `com.zui.calendar` 包内**，按 App rid 找必然找不到；
-     走 `perm-intent` 默认同意即可自动点掉
+2. **系统权限弹窗**（默认同意会自动点掉，不用管有几个）
 3. **课程表功能引导框**「课程表上新了！」
    - 触发时机是 **`pm clear` 后首次启动、在【日历主页】上弹**，
      **不是**"进入课程表功能时"
    - 文案「课程表上新了！」/「点击快速导入课表，自动同步所有上课时间」/「我知道了」
    - rid `curriculum_guide_title` / `curriculum_guide_message` / `timetable_guide_button`
-   - 点掉通知权限框后约 3-5 秒出现
+   - 点掉权限框后出现
 
 ## 导航入口
 

@@ -374,10 +374,20 @@ button.ghost.danger:hover { background: var(--fail-soft); }
 }
 .seg-count { justify-content: center; align-items: center; text-align: center; }
 .seg-count .big-num {
-  font-size: 64px; font-weight: 700; line-height: 1.05; color: var(--accent);
+  font-size: 96px; font-weight: 700; line-height: 1.02; color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
-.chart-mid { width: 100%; height: 220px; flex: 1; min-height: 0; }
+.seg-count .big-rate {
+  margin-top: 10px; font-size: 15px; color: var(--muted);
+}
+.seg-count .big-rate b { font-size: 20px; font-weight: 700; }
+/* 整体成功率 4 段配色（与模块进度条同一套色板，保持一致）：
+   ≥90 优秀 / ≥70 良好 / ≥50 偏低 / <50 差 */
+.big-rate.lv-a b { color: var(--pass); }
+.big-rate.lv-b b { color: #0d8f7a; }
+.big-rate.lv-c b { color: var(--warn); }
+.big-rate.lv-d b { color: var(--fail); }
+.chart-mid { width: 100%; height: 380px; flex: 1; min-height: 0; }
 .chart-legend-note {
   display: flex; flex-wrap: wrap; gap: 18px; justify-content: center;
   margin-top: 12px; font-size: 12.5px; color: var(--muted);

@@ -286,35 +286,51 @@ assert _perm.match_button(_pb(("选择照片", "permission_allow_selected_button
 assert _perm.match_button(_pb(("前往设置", "")), "grant") is None
 print("13 perm_match_ok  deny 绝不点 dont-ask-again；grant 选最小授权且不碰选择照片/前往设置")
 
-# ── 14. 默认权限行为 = grant，且不重复点同一个弹窗 ──────────────────
+# ── 14. 多权限申请：同一个框内点到框消失 ────────────────────────────
+# ⚠️ 真实机制（人指正）：一次申请多个权限时，Android **不关框**，
+# 就在同一个 GrantPermissionsActivity 里点一次换下一个权限。
+# 早先按 (activity, 按钮文本) 去重 → 第 2 个权限被判"同一个还没消失" → break →
+# **后面几个权限全都不点**（真实缺陷：清空数据后首启只点到一部分权限）。
 assert _perm.DEFAULT_ACTION == "grant", f"默认动作被改动: {_perm.DEFAULT_ACTION}"
 
 
-class _PermD:
-    """假设备：权限弹窗点不掉（模拟按钮无响应），用于验证不会反复点。"""
+class _MultiPermD:
+    """假设备：同一个权限框内依次问 3 个权限（点一次换下一个），最后关闭。"""
+    N = 3
+
     def __init__(self):
         self.clicks = []
+        self.i = 0
 
     def app_current(self):
+        if self.i >= self.N:
+            return {"package": "com.zui.calendar", "activity": ".AllInOneActivity"}
         return {"package": "com.android.permissioncontroller",
                 "activity": ".permission.ui.GrantPermissionsActivity"}
 
     def dump_hierarchy(self):
-        return ('<hierarchy><node text="允许" clickable="true" '
-                f'resource-id="{_P}permission_allow_button" '
-                'bounds="[0,0][10,10]"/></hierarchy>')
+        if self.i >= self.N:
+            return "<hierarchy/>"
+        return ('<hierarchy>'
+                f'<node text="日历正在尝试读取权限{self.i}" bounds="[0,0][100,20]"/>'
+                '<node text="允许" clickable="true" '
+                f'resource-id="{_P}permission_allow_button" bounds="[0,0][10,10]"/>'
+                '</hierarchy>')
 
     def click(self, x, y):
         self.clicks.append((x, y))
+        self.i += 1                      # 点完推进到下一个权限
 
 
-_pd = _PermD()
-_pr = _perm.handle(_pd, action=None, timeout_s=0.2)
-assert _pr["detected"] and _pr["handled"], _pr
-assert _pr["action_source"] == "default", _pr
-assert len(_pd.clicks) == 1, \
-    f"同一弹窗被点 {len(_pd.clicks)} 次——按钮无响应时会反复点（真实缺陷）"
-print("14 perm_default_ok  未声明意图时默认 grant，且同一弹窗只点一次")
+_md = _MultiPermD()
+_mr = _perm.handle(_md, action=None, timeout_s=0.2)
+assert len(_md.clicks) == _MultiPermD.N, \
+    f"同一框内 {_MultiPermD.N} 个权限应连点 {_MultiPermD.N} 次，" \
+    f"实际 {len(_md.clicks)} 次（旧 bug：只点 1 次就 break）"
+assert _mr["detected"] and _mr["handled"], _mr
+assert _mr["action_source"] == "default", _mr
+assert _mr["dialog_count"] == _MultiPermD.N, _mr
+print("14 perm_multigrant_ok  同一框内多权限连续点到框消失（不再点一次就停）")
 
 # ── 15. summarize_xml 三态（nav / full / fg_package 过滤）────────────
 _X = ('<hierarchy>'

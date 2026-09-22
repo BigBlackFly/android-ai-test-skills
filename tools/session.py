@@ -181,6 +181,20 @@ def export_runbook(db, session_id: int, out: str | None) -> str:
 
             if cur_intent and not declared:
                 line += f"\n   - 权限意图（延续）：{cur_intent}"
+
+            # ── 检查点：act 本身就带 activity（动作后的画面），直接当检查点用 ──
+            # ⚠️ 这样「验证类步骤」不必再补一次独立 observe ——
+            # `act --full` 一次调用就同时给了动作 + 全量节点，检查点照样有。
+            # 只有"纯验证步"（该步没有 act）才需要单独 observe。
+            ck = f"activity={data.get('activity')}" if data.get("activity") else ""
+            if ck:
+                if ck == last_ck:
+                    ck_dup += 1
+                    if ck_dup == 1 and any("👁" in x for x in lines[-6:]):
+                        line += f"\n   - 👁 {ck}（与前一步相同，连续重复核对）"
+                else:
+                    last_ck, ck_dup = ck, 0
+                    line += f"\n   - 👁 检查点：{ck}"
             lines.append(line)
         elif e["kind"] == "read":
             lines.append(f"   - 🔍 {e['tool']}：{e['detail']}")

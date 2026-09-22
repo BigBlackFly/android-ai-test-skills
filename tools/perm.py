@@ -120,10 +120,30 @@ def match_button(buttons: list[dict], action: str) -> dict | None:
     return None
 
 
+def permission_prompt(xml_text: str) -> str:
+    """取权限框里"正在申请哪个权限"的文案，**仅用于留痕**。
+
+    形如「日历正在尝试读取联系人」。取不到返回空串。
+    不做任何判断依据 —— 点击逻辑只看"框还在不在"。
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:  # noqa: BLE001
+        return ""
+    for el in root.iter("node"):
+        t = (el.attrib.get("text") or "").strip()
+        # 申请语句特征；排除按钮自身文案
+        if t and ("正在尝试" in t or "想要" in t) and t not in _GRANT_TEXTS + _DENY_TEXTS:
+            return t
+    return ""
+
+
 def detect(d, timeout_s: float = 0.8, interval_s: float = 0.2) -> dict | None:
     """有界轮询检测权限弹窗。
 
-    返回 {"activity":..., "buttons":[...]} 或 None；只读不点。
+    返回 {"activity","buttons","package","prompt"} 或 None；只读不点。
+    `prompt` 仅作留痕（本次申请的是哪个权限），**不参与任何判断**。
 
     ⚠️ 默认窗口刻意取小（0.8s）：**屏幕上没有权限弹窗时也要空等到 deadline**，
     而每步 act/observe 都会调用一次 —— 3s 的默认值等于每步白等 3 秒。
@@ -136,10 +156,13 @@ def detect(d, timeout_s: float = 0.8, interval_s: float = 0.2) -> dict | None:
             cur = d.app_current() or {}
             act = cur.get("activity") or ""
             if is_permission_activity(act):
-                btns = list_buttons(d.dump_hierarchy())
+                xml = d.dump_hierarchy()
+                btns = list_buttons(xml)
                 # activity 对了但还没渲染出按钮时继续等
                 if btns:
-                    return {"activity": act, "buttons": btns, "package": cur.get("package")}
+                    return {"activity": act, "buttons": btns,
+                            "package": cur.get("package"),
+                            "prompt": permission_prompt(xml)}
         except Exception:  # noqa: BLE001
             pass
         if time.time() >= deadline:
@@ -156,49 +179,44 @@ DEFAULT_ACTION = "grant"
 
 
 def handle(d, action: str | None = None, timeout_s: float = 0.8,
-           chain_max: int = 5, observe_only: bool = False) -> dict:
-    """检测并按 action 处理权限弹窗（含链式多弹窗）。
+           chain_max: int = 8, observe_only: bool = False) -> dict:
+    """看见权限框就点，点到框没了为止 —— 和测试员的做法完全一致。
+
+    多权限申请时 Android **不关框**，就在同一个框里点一次换下一个权限，
+    所以循环判据只有一条：**框还在就继续点**。`chain_max` 只是防死循环的兜底。
 
     action=None → 用 DEFAULT_ACTION（grant，默认同意）。
     observe_only=True → 只检测不点击（调试/仅取证时用）。
-    返回 {"detected","handled","clicks":[{text,rid,center}],"dialog_count",...}
+    返回 {"detected","handled","clicks","dialog_count",...}
     """
     result = {"detected": False, "handled": False, "clicks": [],
-              "dialog_count": 0, "activity": None, "buttons": []}
+              "dialog_count": 0, "activity": None, "buttons": [], "prompts": []}
     if not observe_only:
         result["action"] = action or DEFAULT_ACTION
         result["action_source"] = "declared" if action else "default"
-    # ⚠️ 防重复点击同一个弹窗：链式循环本意是接住"连弹多个"，
-    # 但若某次点击没能关掉弹窗（按钮无响应/被遮挡），循环会**反复点同一个按钮**
-    # （实测 chain_max=5 时同一按钮被点 5 次）。用 (activity, 按钮文本) 去重。
-    clicked_sig: set[tuple] = set()
     for i in range(max(1, chain_max)):
         info = detect(d, timeout_s=timeout_s if i == 0 else 2.0)
         if not info:
-            break
+            break                       # 框没了 = 点完了（或本来就没有）
         result["detected"] = True
         result["dialog_count"] = i + 1
         result["activity"] = info["activity"]
         result["buttons"] = [b["text"] for b in info["buttons"]]
+        if info.get("prompt"):
+            result["prompts"].append(info["prompt"])   # 留痕：本次授予了哪些权限
         if observe_only:
             break                       # 只看不点
         btn = match_button(info["buttons"], action or DEFAULT_ACTION)
         if not btn:
-            result["unmatched"] = True  # 弹窗在，但没有可点的匹配项 → 交回 AI
+            result["unmatched"] = True  # 框在，但没有可点的匹配项 → 交回 AI
             break
-        sig = (info["activity"], btn["text"])
-        if sig in clicked_sig:
-            # 同一个弹窗还没消失 → 不要再点，交回 AI（可能按钮无响应）
-            result["stuck"] = True
-            break
-        clicked_sig.add(sig)
         try:
             d.click(*btn["center"])
             result["clicks"].append({"text": btn["text"], "rid": btn["rid"],
                                      "center": btn["center"]})
             result["handled"] = True
-            time.sleep(0.3)             # 给下一个弹窗留渲染时间
         except Exception as e:  # noqa: BLE001
             result["click_error"] = str(e)
             break
+        time.sleep(0.5)                 # 给框内换下一个权限留渲染时间
     return result
