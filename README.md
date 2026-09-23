@@ -2,14 +2,14 @@
 
 Android 设备黑盒 GUI 测试 v2：**AI 即执行者**。
 
-对话里的 AI（CodeBuddy / Claude Code）直接驱动真机执行测试用例：每步调用薄工具层
-"看（observe）/ 动（act）/ 读（read）"，自行分析结果、规划下一步；知识卡承载 App
-操作经验；每步证据自动落盘，最终输出带证据的测试报告。
+对话里的 AI（CodeBuddy / Claude Code）直接驱动真机执行测试用例：每步调用薄工具层"看（observe）/ 动（act）/ 读（read）"，自行分析结果、规划下一步；可以从UIUX和知识卡片中查询已有知识；每步证据自动落盘，最终输出带证据的测试报告。
 
-与 v1（AI 写 Python 用例脚本 → 确定性回放）的区别：**不再写 case**。
+与 v1（AI 写 Python 用例脚本 → 确定性回放）的区别：
+- **不再写 case**。
 用例就是用户口述的步骤+预期，执行即探索，成功路径的知识沉淀进知识卡/
 链路卡而不是代码。v1 框架时期的日历链路源码已归档至
 `knowledge/_runs/com.zui.calendar/_v1_flow_reference.py` 供参考。
+- **新增了 UIUX 知识库**。UIUX 是 App 的功能设计稿，是只读的，见 [使用说明](docs/UIUX知识库.md)；知识卡承载 App 的实际测试经验，可实时更新。
 
 ## 快速开始
 
@@ -58,7 +58,9 @@ adb devices -l                              # 设备在线且已授权
 
 ```
 ├── SKILL.md        # 工具说明书（AI 按需加载）
-├── tools/          # 薄工具层：observe / act / read / session + db
+├── tools/          # 薄工具层
+├── media-resources/ # 会话准备使用的图片和视频
+├── uiux-reference/ # 测试期间只读；按包名组织的 UIUX 页面、局部图及来源
 ├── knowledge/      # App 知识卡（按包名，按交互类型组织）
 ├── webui/          # 测试台前端（会话时间线 / 知识库编辑）
 ├── webui.py        # 测试台服务（标准库，零依赖）

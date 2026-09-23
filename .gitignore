@@ -8,3 +8,8 @@ storage/.evidence_seq
 storage/vision.json
 storage/_smoke_*
 *.pyc
+
+/.idea
+/AGENTS.md
+/devdocs/
+/uiux-reference/.idea/

@@ -377,6 +377,9 @@ def main() -> None:
         # 扩 logcat 缓冲区防冲（-G 5M）+ 清 crash 缓冲区归因；设备不在也不影响建会话
         from common import try_connect
         d = try_connect(args.device)
+        # 将设备的 sdcard 初始化到一个相对干净的状态，并预置一些测试资源文件
+        import sdcard
+        sdcard.init(args.device)
         if d is not None:
             notes = []
             for cmd, okmsg in (("logcat -G 5M", "logcat 缓冲区已扩到 5M"),

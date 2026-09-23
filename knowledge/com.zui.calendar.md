@@ -163,13 +163,13 @@
 2. **系统权限弹窗**（相机/照片）→ **仅当对应权限未授予时才弹**；已授予则跳过
    - 由 `perm-intent` 自动响应（默认同意）
 
-测权限行为前若上一轮已允许过，需 `revoke` 重置前提，否则第 2 段根本不出现。
+若用例前置为“未授予任何权限”，先执行 `state.py clear --package com.zui.calendar`（pm clear），再重新进入入口。只有针对某项权限的分支调整才用 `revoke`。
 
 ## 链路-图库导入（到「确认课程表基本信息」页）
 
 - 解析需联网（约 20s），**等待窗口给到 60s**；低于 20s 会在解析中途误判超时
-- 素材 `/sdcard/Pictures/日历/课程表.png`，导入前先发 `MEDIA_SCANNER_SCAN_FILE` 广播，
-  否则 PhotoPicker 显示「无相册」
+- 环境准备完成后，按用例将课程表素材放到 `/sdcard/Pictures/日历/课程表.png`。导入前发送
+  `MEDIA_SCANNER_SCAN_FILE` 广播，使素材进入媒体索引后再打开 PhotoPicker。
 - **选图别盲点第一张**：照片 tab 按媒体库时间倒序、所有缩略图**共用
   `icon_thumbnail` 一个 rid** → 第一张取决于媒体库最近有什么（其他用例拍照/截图会插队；
   `pm clear` 不清 `/sdcard`）。要先看缩略图内容再选（AI 判图或视觉通道）
