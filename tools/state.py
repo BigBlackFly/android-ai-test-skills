@@ -1,10 +1,9 @@
 """state：设备状态原语（权限/数据/应用生命周期），不动屏幕内容。
 
-权限测试的第一选择：测"已授权/已拒绝"路径时用 grant/revoke 预置状态，
-弹窗根本不出现；只有测弹窗交互本身（用户点允许/拒绝那一刻的行为）才需要
-act --watch 的弹窗内点击。全部操作自动记入当前会话事件流。
+用例执行前的清理与授权规则见 SKILL.md。全部操作自动记入当前会话事件流。
 
 用法：
+  python state.py grant  --package com.app --all-permissions
   python state.py grant  --package com.app --perm android.permission.CAMERA
   python state.py revoke --package com.app --perm android.permission.CAMERA
   python state.py clear  --package com.app        # ⚠️ 清空应用全部数据
@@ -14,6 +13,7 @@ act --watch 的弹窗内点击。全部操作自动记入当前会话事件流�
 from __future__ import annotations
 
 import argparse
+import re
 
 from common import (add_common_args_all_subcommands, connect, emit, fail,
                     log_auto)
@@ -49,6 +49,24 @@ def _perm_granted(d, pkg: str, perm: str) -> bool:
     return False
 
 
+def _command_ok(response) -> bool:
+    return response.exit_code == 0 and not re.search(
+        r"(?im)^\s*(?:Error\b|Failure\b|Exception\b|java\.)", response.output or "")
+
+
+def grant_all(d, pkg: str) -> dict:
+    """调用系统命令批量授权，返回命令执行结果。"""
+    # 缺包名会使原生命令作用于全部包；校验只用于批量授权。
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", pkg):
+        raise ValueError("必须提供已确定的单个包名；包名不明时跳过准备")
+    response = d.shell(["pm", "grant", "--all-permissions", pkg])
+    ok = _command_ok(response)
+    return {"cmd": "grant", "package": pkg, "user": 0, "all_permissions": True,
+            "output": (response.output or "").strip(), "exit_code": response.exit_code,
+            "ok": ok,
+            "hint": "批量授权命令执行成功。" if ok else "批量授权命令失败，请检查 output。"}
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="state：设备状态原语")
     p.add_argument("--serial", default=None)
@@ -57,7 +75,12 @@ def main() -> None:
     for name in ("grant", "revoke"):
         s = sub.add_parser(name)
         s.add_argument("--package", required=True)
-        s.add_argument("--perm", required=True, help=f"短名或全名，短名: {', '.join(PERMS)}")
+        group = s.add_mutually_exclusive_group(required=True) if name == "grant" else s
+        group.add_argument("--perm", required=name == "revoke",
+                           help=f"短名或全名，短名: {', '.join(PERMS)}")
+        if name == "grant":
+            group.add_argument("--all-permissions", action="store_true",
+                               help="批量授予 App 声明的运行时权限")
 
     s = sub.add_parser("clear")
     s.add_argument("--package", required=True)
@@ -78,6 +101,12 @@ def main() -> None:
         fail(f"设备连接失败: {e}")
 
     try:
+        if args.cmd == "grant" and args.all_permissions:
+            result = grant_all(d, args.package)
+            detail = f"pm grant --all-permissions {args.package} → {'执行成功' if result['ok'] else '执行失败'}"
+            log_auto("state", "state grant", detail, result)
+            emit(result["ok"], result)
+            return
         if args.cmd in ("grant", "revoke"):
             perm = resolve_perm(args.perm)
             out = (d.shell(f"pm {args.cmd} {args.package} {perm}").output or "").strip()

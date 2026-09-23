@@ -26,6 +26,8 @@ adb devices -l                              # 设备在线且已授权
 # 3. 之后交给 AI：把用例口述给它，它按 SKILL.md 的工作流执行
 ```
 
+执行前的数据清理与权限准备见 [SKILL 权限规则](SKILL.md#权限准备与执行中的响应)。
+
 ## 工具层（无流程逻辑，每个都是独立命令）
 
 | 命令 | 作用 |
@@ -33,7 +35,7 @@ adb devices -l                              # 设备在线且已授权
 | `tools/observe.py` | dump UI 树（摘要节点列表）+ 截图 + 前台包名/activity/旋转 |
 | `tools/act.py` | tap / longclick / input / swipe / back / home / key；`--via` 溯源、`--why` 理由、`--watch` 瞬态弹窗响应、`--settle` 稳定窗口 |
 | `tools/read.py` | OCR 读 toast / Canvas 自绘文字（输出像素 + 归一化坐标） |
-| `tools/state.py` | 设备状态原语：权限 grant/revoke、pm clear、应用启停 |
+| `tools/state.py` | 用例执行前的数据清理、运行时权限批量/单项授予与撤销，以及应用启停 |
 | `tools/session.py` | 会话生命周期：start / pause(--ask 问人) / resume / finding / finish / export 链路卡 |
 | `tools/logcat.py` | 崩溃/ANR 取证：分级（被测/关联/无关）、自动抓崩溃前 20s 日志 |
 | `tools/vision.py` | 可选视觉通道：OpenAI 兼容多模态模型问图（测试台「视觉模型」页配置） |

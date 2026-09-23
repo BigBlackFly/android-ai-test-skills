@@ -34,20 +34,18 @@ description: Android 真机 GUI 测试。当用户给出测试用例（步骤+�
 命令前缀省略为 `.venv\Scripts\python tools\`。多设备加 `--serial`；
 **所有公共参数写在子命令前后都可以**。
 
-## 测试前准备
-
-如果测试用例中要求的测试前置条件包含“首次使用、未授予任何权限”等条目，那么需使用 `state.py clear --package <包名>` 执行 `pm clear`，随后按用例重新进入 App。单项权限调整使用 `grant/revoke --perm <权限>`。
-
 ## 最小工作流
 
 ```powershell
-# ① 开会话（已有正式用例时用 --case <id> 复用）
+# 1.开会话（已有正式用例时用 --case <id> 复用）
 python session.py start --case 1 --device <serial> --package com.app
 
-# ② 执行：act 每次自动回传动作后的画面（截图 + dump + nodes）
+# 2.按本文档中的权限章节的要求，完成执行前的准备（执行前：先清数据，再决定是否预先授权）
+
+# 3.按用例执行操作：act 每次自动回传动作后的画面（截图 + dump + nodes）
 python act.py --serial <s> tap --x 540 --y 1200 --via "rid=xxx" --why "点保存"
 
-# ③ 记断言 + 收尾
+# 4.记断言 + 收尾
 python session.py finding --status PASS --expect "<预期>" --actual "<实际看到的>"
 python session.py finish  --status PASS --summary "<结论>"
 ```
@@ -58,12 +56,12 @@ python session.py finish  --status PASS --summary "<结论>"
   先查有没有卡、按卡逐步执行可省大量探索时间（见 `docs/知识卡与链路卡.md`）；
   失败/阻塞的会话不导出
 
-### 先读 UIUX，再读知识卡
+### ⚠️ 先读 UIUX，再读知识卡
 
-- 开始执行一个测试用例时，先从 `uiux-reference/README.md` 读取相关页面/功能的UIUX，对相关内容有个大概的理解。然后再读取`knowledge/`目录下的知识卡。相关资料缺失时，继续测试即可，不要报错终止测试流程。
-- 测试执行中，当你对入口、交互或预期不确定，或上下文遗忘时，按当前问题复查 UIUX 与知识卡，结合用例要求和当前设备证据判断；仍不确定时 `session.py pause --ask` 并询问用户。`uiux-reference/` 在测试期间保持只读；新经验写入 `knowledge/`，缺口与差异写入报告。详情见 [UIUX 使用说明](docs/UIUX知识库.md)。
+- 开始执行一个测试用例之前，先从 `uiux-reference/README.md` 检索相关页面/功能的UIUX，然后再读取`knowledge/`目录下的知识卡。相关资料缺失时，跳过检索，继续测试。
+- 测试执行中，当你对入口、交互或预期不确定，或上下文遗忘时，可以复查 UIUX 与知识卡，结合用例要求和当前设备证据判断；仍不确定时 `session.py pause --ask` 并询问用户。`uiux-reference/` 在测试期间保持只读；新经验写入 `knowledge/`，缺口与差异写入报告。详情见 [UIUX 使用说明](docs/UIUX知识库.md)。
 
-### ⚠️ 先读知识卡再执行测试（`start`/首个 `observe` 会给提示）
+### ⚠️ 先读知识卡，再执行测试（`start`/首个 `observe` 会给提示）
 
 `session.py start` 的返回里如果带 **`knowledge_hint`**，说明该 App 有实测知识卡：
 
@@ -80,6 +78,44 @@ python session.py finish  --status PASS --summary "<结论>"
 
 > 提示**只在会话开头给一次**（避免每步重复占 token）。包名没卡时会给
 > `_system.md`（系统界面兜底卡）的提示。
+
+## 执行测试用例之前的准备工作
+为了增加测试过程的稳定性，更聚焦测试的重点，Agent 可以提前做一些准备工作。这些工作只允许在正式开始执行测试用例**之前**完成。
+
+### 清除 App 的数据
+App 中的上次测试产生的残留可能干扰下个用例的执行，还可能被误当作经验写入知识卡。因此，开始测试每个新的独立用例之前，应该清理目标 App 数据。
+
+### 给 App 授予全部权限
+在清除 App 数据之后，下次启动 App 会弹出权限弹窗。对于一般的功能测试用例，我们可以提前给 App 授权，这样下次启动 App 就不会有权限弹窗，从而让测试过程聚焦于测试用例要求的的具体功能。 
+
+但是，如果测试用例要测试“首次使用App”、"权限申请流程"，那就不能提前给 App 授权，因为要保留初始流程。
+
+### 具体实施流程
+Agent 从测试用例及已有资料确定目标包名，按以下优先级进行判断和处理：
+
+| 优先级 | 条件                                 | 操作                           |
+|-----|------------------------------------|------------------------------|
+| 1   | 无法确定具体包名                           | 跳过清理和预授权，记录原因，直接执行测试用例       |
+| 2   | 包名明确的新独立用例                         | 先 `pm clear` 清理 App 数据       |
+| 3   | 测试用例要求测试：首次进入/首次打开，或测试权限申请、授予、拒绝流程 | 清理后直接执行测试用例，绝不能预先授权          |
+| 4   | 普通功能测试                             | 清理后授予 App 申请的全部运行时权限，再执行测试用例 |
+
+开会话后，按照上面的规则，可以选择调用下面的工具，并将结果记入当前会话：
+
+> 清除app的数据并收回所有的权限：
+> ```powershell
+> python state.py --serial <serial> clear --package <package>
+> ```
+
+> 为app批量授予全部的权限：
+> ```powershell
+> python state.py --serial <serial> grant --package <package> --all-permissions
+> ```
+
+## 按测试用例的要求，准备其他的前提条件
+
+- 如果测试用例要求了一些其他的前提条件，例如“设备中已有录音”、“相机已拍摄照片”、“设备上没有任何视频文件”等等，那么Agent需要通过操作平板，尽可能地创造这些条件以执行测试用例。不能因为初始条件不满足而直接放弃执行测试。
+- 如果经过尝试，无法创造这些前提条件，才允许报BLOCKED。
 
 ## 执行节奏（省时间、别丢弹窗）
 
@@ -158,79 +194,16 @@ act → 从返回的 nodes 里找下一个目标 → act → ...
 | 判置灰/颜色/图标点亮 | 才需要看图 |
 | UI 树里完全找不到（自绘控件） | 才需要看图/OCR |
 
-## 权限：先读懂用例的"隐形条件"
+## 执行中，按测试用例的要求处理权限弹窗
 
-**有些用例不写"需要 XX 权限"，但流程必然触发权限申请。** 执行前读用例，
-把**名词 → 权限**对上：图库/相册/照片 → 照片读取；拍照/相机/扫码 → 相机；
-文件/导入 → 存储；录音/麦克风 → 麦克风；位置/定位 → 位置；通知/推送 → 通知。
-
-**不只看步骤，也看预期**——预期说"能进入 XX 入口"，那条路径就必须通，
-它前面的权限必须先过。
-
-### 处理方式：**默认同意**，需要拒绝时显式声明
-
-**默认行为：遇到权限弹窗自动点「允许」**——大多数用例测的是"功能能不能用"，
-授权只是通往功能的前置。**不用声明，直接执行动作即可**：
+工具默认走允许分支；拒绝分支在触发动作前声明 `deny`，分支结束后清除意图。意图有效期为 10 分钟，分支顺序按用例执行。
 
 ```powershell
-python act.py --serial <s> tap --x ... --via "rid=btnImportFromGallery" --why "从图库导入"
-# → 权限弹窗自动点「全部允许」，无需任何额外参数
+python act.py --serial <serial> --perm-action deny --perm camera tap --x ... --why "用例要求拒绝相机权限"
+python session.py perm-intent --clear
 ```
 
-**要测「拒绝」路径时才声明**：
-
-```powershell
-# 推荐：一次调用完成「声明 + 动作」
-python act.py --serial <s> --perm-action deny --perm camera tap --x ... --why "拒绝分支"
-
-# 也可单独声明（意图在会话内持续有效，直到 --clear）
-python session.py perm-intent --action deny --perm camera
-python session.py perm-intent --clear      # 分支测完清除
-```
-
-> **不要预先 grant** —— 真实用户第一次点也是弹框，用例要验的就是这条真实路径。
-> 默认点「允许」是**响应弹窗**，不是跳过弹窗。
->
-> 一次申请多个权限时是**同一个框、点一次换下一个** —— 默认同意会一直点到框消失，
-> 不用操心有几个。
-
-**为什么工具要接管**：系统权限框约 **6 秒**未点击会**自动消失**，
-而"该同意还是拒绝"要读懂用例（慢）。默认同意保证了绝大多数步骤能走下去；
-要拒绝时提前声明，动作时工具只负责快——
-**不要靠 `--watch` 现场猜**（猜不到哪个动作会弹窗时就全丢）。
-
-**匹配规则**（工具内置，与文案/语言无关）：按 resource-id 优先匹配；
-grant 优先「全部允许/始终允许」；deny **只点「拒绝」**，绝不点「拒绝并不再询问」
-（会设 don't-ask-again，导致后续"授予"分支弹窗不再出现）；
-「选择照片」「前往设置」**不自动点**，交回 AI 判断。
-
-**动作后的返回**：
-
-| 字段 | 含义 |
-|---|---|
-| `permission.detected` | 检测到权限弹窗 |
-| `permission.handled` + `clicks` | 已自动点击（含点了哪个按钮） |
-| `permission.action` / `action_source` | 本次用的动作，以及来自声明还是默认 |
-| `permission.unmatched` | 弹窗在，但无匹配按钮 → 看 `buttons` 自己决定 |
-
-### 双分支（同意 + 拒绝）：分两轮，先拒后允
-
-```powershell
-# ── 第一轮：拒绝（要测拒绝才需要声明；不声明就是默认同意）──
-python act.py --serial <s> --perm-action deny --perm camera tap --x ... --why "拒绝分支"
-# → 验证拒绝后的提示
-
-# ── 第二轮：允许 ──
-python state.py revoke --package com.app --perm camera     # ⚠️ 必须先撤销！
-python session.py perm-intent --clear                      # 清掉 deny，回到默认同意
-python act.py --serial <s> tap --x ... --why "允许分支"
-# → 验证后续功能可用
-```
-
-1. **先拒绝后允许**：拒绝会改变弹窗形态（多出"不再询问"），先拒绝能让"允许"
-   落在确定的第二形态上。
-2. **第二轮必须先 `revoke`**：权限已授予时系统**不会再弹窗**，不撤销就会卡住。
-3. **第二轮记得清掉 deny 意图**（`perm-intent --clear`），否则默认同意会被覆盖。
+核对返回的 `permission` 和实际点击按钮。“选择照片”“前往设置”等未自动处理的按钮，由 Agent 按用例判断。
 
 ## 崩溃：一次即 BLOCKED，工具层已硬性拦截
 
