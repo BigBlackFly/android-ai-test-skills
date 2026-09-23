@@ -26,6 +26,7 @@ import time
 from datetime import datetime
 
 from common import (add_common_args, add_common_args_all_subcommands, capture,
+                    next_targets, labeled_nodes, npm_identity,
                     connect, emit, evidence_paths, fail, guard_terminated,
                     log_auto, rel, summarize_xml)
 
@@ -339,6 +340,12 @@ def main() -> None:
         info = {**info, "perm_intent_set": perm_inline}
     if perm_result and perm_result.get("detected"):
         info = {**info, "permission": perm_result}
+    # 落库前先算一份**屏幕身份签名**（`kind=value` 集合），随事件一起存。
+    # 用途：事后自动整理路径边时，判断"这一步落在路径图的哪个节点"。
+    # 只存签名不存整个 nodes —— 签名几十个短串，nodes 可能有上百个对象。
+    _sig = npm_identity(xml.read_text(encoding="utf-8"),
+                        None if getattr(args, "no_filter", False) else info.get("package"))
+    info = {**info, "sig": _sig}
     log_auto("act", f"act {args.action}", detail, info, rel(png), duration_ms, started_at)
 
     nodes = summarize_xml(xml.read_text(encoding="utf-8"),
@@ -349,12 +356,17 @@ def main() -> None:
         "action": action,
         **info,
         "evidence": {"png": str(png), "xml": str(xml), "meta": str(meta)},
+        # 「下一步能点什么」精简清单放最前 —— 直接从上一层的返回走到下一步，
+        # **不需要再单独 observe 拿坐标**（那会多花 2s 工具 + 10~15s 决策等待）。
+        "next": next_targets(nodes, labeled=labeled_nodes(
+            xml.read_text(encoding="utf-8"),
+            None if getattr(args, "no_filter", False) else info.get("package"))),
         "nodes": nodes,
         "nodes_count": len(nodes),
         "nodes_mode": "full" if getattr(args, "full", False) else "nav",
-        "hint": ("核对 after 画面是否变化再规划下一步；"
-                 "nodes 为导航模式（仅可点节点）。需要按文字断言页面内容时"
-                 "加 --full 重取；toast 等浮层不在 nodes 里，用 read.py OCR"),
+        "hint": ("下一步点 `next` 里的目标（c=坐标，t=文字，r=rid）；"
+                 "需要按页面文字断言时看 nodes（--full 才是全量）。"
+                 "toast 等浮层不在 nodes 里，用 read.py OCR"),
     }
     if perm_inline:
         payload["perm_intent_set"] = perm_inline

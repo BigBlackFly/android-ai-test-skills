@@ -26,6 +26,10 @@
    - rid `curriculum_guide_title` / `curriculum_guide_message` / `timetable_guide_button`
    - 点掉权限框后出现
 
+> ⚠️ **这三个只在清数据后出现，冷启动不会再有**（本地已记"看过"）。
+> 所以验"首次使用/升级后首次"的用例**必须清数据**，冷启动复现不出来。
+> 反之，**普通用例不要清数据** —— 否则每条都要重走这三连（见 SKILL.md「状态准备」）。
+
 ## 导航入口
 
 | 去向 | 走法 |
@@ -146,12 +150,10 @@
 
 - 新建的课表**不自动抢占"当前"**
 
-## 页面-课程表空状态
+## 坑-课程表空状态
 
-- 文案「还未添加课程表」；容器 `emptyView`
-- 三个入口按钮直接铺在屏幕上（**此时没有工具栏，不要再找「更多」菜单**）
-- 图库导入出口 = 系统 PhotoPicker
-  （`com.android.providers.media.module/.photopicker.PhotoPickerGetContentActivity`）
+- 三个入口按钮**直接铺在屏幕上**，**此时没有工具栏** —— 不要再去找「更多」菜单
+- 容器 `emptyView`；文案「还未添加课程表」
 
 ## 链路-导入弹窗顺序（拍照/图库通用，先读这条）
 
@@ -161,62 +163,58 @@
    - 日历自己的框，**与系统权限弹窗无关，无论权限是否已授予都会弹**
    - **必须关掉，否则后面什么都不发生**：不点掉，相机 25s 都不拉起、PhotoPicker 也不出现
 2. **系统权限弹窗**（相机/照片）→ **仅当对应权限未授予时才弹**；已授予则跳过
-   - 由 `perm-intent` 自动响应（默认同意）
 
 测权限行为前若上一轮已允许过，需 `revoke` 重置前提，否则第 2 段根本不出现。
 
-## 链路-图库导入（到「确认课程表基本信息」页）
+## 坑-图库导入解析
 
 - 解析需联网（约 20s），**等待窗口给到 60s**；低于 20s 会在解析中途误判超时
-- 素材 `/sdcard/Pictures/日历/课程表.png`，导入前先发 `MEDIA_SCANNER_SCAN_FILE` 广播，
-  否则 PhotoPicker 显示「无相册」
 - **选图别盲点第一张**：照片 tab 按媒体库时间倒序、所有缩略图**共用
-  `icon_thumbnail` 一个 rid** → 第一张取决于媒体库最近有什么（其他用例拍照/截图会插队；
-  `pm clear` 不清 `/sdcard`）。要先看缩略图内容再选（AI 判图或视觉通道）
-- **解析失败弹窗（模态，非 toast）**：标题「图片内容不是课程表」+ 正文 +「知道了」
+  `icon_thumbnail` 一个 rid** → 第一张取决于媒体库最近有什么（其他用例拍照/截图会插队）。
+  要先看缩略图内容再选
+- **解析失败弹窗（模态，非 toast）**：标题「图片内容不是课程表」+「知道了」
   - 这是**通用解析失败框**：选错图会弹、**真课程表云端解析偶发失败也弹**
-    → 不能据断定"图选错了"
-  - 点「知道了」后回裁剪页。预检通过的候选被弹此框 = 偶发失败 → 重试同一张；
-    总次数上限 3 次，用尽 BLOCKED，**禁止归因为"超时/需联网"**
-- **目标页控件（断言用）**：名称 `et_schedule_name`（图库导入预填「学生课程表」）、
-  完成 `btn_finish`、学期开始 `layout_semester_start_date`/`tv_semester_start_date`、
+    → 不能据此断定"图选错了"
+  - 预检通过的候选被弹此框 = 偶发失败 → 重试同一张；总次数上限 3 次，
+    用尽 BLOCKED，**禁止归因为"超时/需联网"**
+
+## 坑-必填校验（与规格不符）
+
+规格说"名称为空时完成按钮**置灰**"，实测**不置灰**：
+
+- 新建课程表页 `save_view`、图库导入确认页 `btn_finish`：`enabled=true`、`clickable=true`
+- 点击后**被校验拦住**（页面停在原页、无 toast）
+- 即"必填约束存在、表现形式与需求不符" → 按用例记 FAIL 并注明实际行为
+- **置灰断言**：日历的置灰是「整体变淡」，UI 树 `enabled/clickable` 可能不变；
+  以截图判读，未配置视觉凭据时降级 WARN（不是 FAIL）
+
+## 坑-拍照导入返回
+
+从相机返回：返回键可能被取景器吃掉，`am force-stop com.zui.camera` 更快更稳；
+且退回的是**日历主界面**（不是课程表页），需重新走「更多 → 课程表」。
+
+## 页面-新建课程表（`EditTimetableActivity`）
+
+- 名称默认空且**必填**（图库导入确认页才有预填名）
+- 保存 = toolbar 右侧 `save_view`（文本「完成」，clickable），**不是** `btn_finish`；
+  `action_save` 是其不可点父容器
+- **不要按 back 收键盘** —— 见 `_system.md`「BACK 键-两段式」（有输入法时第 1 次只收键盘，
+  第 2 次才回退，容易多退一级或丢未保存的编辑）
+- 两个开关**默认均关闭**（`switch_weekend_classes`/`switch_show_non_current_week`）；
+  图库导入确认页的「显示非本周课程」可能默认开启，两者默认态不同
+- ⚠️ **本页就是「课程表基本信息编辑页」**：用例前提写"手动创建后进入基本信息编辑页"时停在本页即可
+- ⚠️ **点「完成」保存后的落点是周视图**（不是列表页），且**新建的课表名不会作为
+  可点列表项出现**
+
+## 页面-图库导入确认页（`TempConfirmTimetableActivity`）
+
+- 断言用控件：名称 `et_schedule_name`（**预填**「学生课程表」/ 学期名）、完成 `btn_finish`、
+  学期开始 `layout_semester_start_date`/`tv_semester_start_date`、
   当前周数 `layout_current_week`/`tv_current_week`、总周数 `layout_total_weeks`/`tv_total_weeks`、
   周末有课 `switch_weekend_classes`、显示非本周 `switch_show_non_current_week`
 - **学期总周数弹框 = 滚轮选择器**：当前值居中高亮，数字为 Canvas 绘制 **dump 读不到**
   → 用 `read.py` OCR 定位数字坐标后点选
-- **必填校验（与规格不符）**：名称清空后「完成」**不置灰**（dump `enabled=true`），
-  点击后**停留确认页被校验拦截**。规格写"必填为空完成置灰"时按用例记 FAIL 并注明实际行为
-  - **置灰断言**：日历的置灰是「整体变淡」，UI 树 `enabled/clickable` 可能不变；
-    以截图判读或按用例预期，未配置视觉凭据时降级 WARN（不是 FAIL）
 - 学期开始点开为系统 DatePicker（`android.widget.DatePicker`），「取消」关闭
-
-## 链路-拍照导入（到相机拉起）
-
-空状态页「拍照导入」→ 提示弹窗「知道了」→ 相机权限弹窗（未授予时）→
-`com.zui.camera/.CaptureActivity`。
-
-- **提示弹窗不关，相机 25s 都不拉起**
-- 从相机返回：返回键可能被取景器吃掉，`am force-stop com.zui.camera` 更快更稳；
-  且退回的是**日历主界面**（不是课程表页），需重新走「更多 → 课程表」
-
-## 链路-手动创建（到新建课程表页）
-
-链路只有一步（`btnCreateManually` → `EditTimetableActivity`），坑全在目标页：
-
-- 名称默认空且**必填**：不填点「完成」会被校验拦住（页面不动）；图库导入确认页才有预填名
-  - ⚠️ **与需求的差别**：需求要求"名称为空时完成按钮**置灰**"；实测**不置灰**
-    （`save_view` 的 `enabled=true`、`clickable=true`），而是**点击后被校验拦住**
-    （页面停在编辑页、无 toast）。即"必填约束存在、表现形式与需求不符"
-- 保存 = toolbar 右侧 `save_view`（文本「完成」，clickable），**不是** `btn_finish`；
-  `action_save` 是其不可点父容器
-- **不要按 back 收键盘** —— back 会直接退出 `EditTimetableActivity` 丢编辑
-- 两个开关**默认均关闭**（`switch_weekend_classes`/`switch_show_non_current_week` checked=false）；
-  图库导入确认页的「显示非本周课程」可能默认开启，两者默认态不同
-- ⚠️ **「新建课程表」页本身就是「课程表基本信息编辑页」**：同一 `EditTimetableActivity`，
-  含 名称框 + 学期信息 + 课程时间设置 + 课程提醒时间 + 两个开关。
-  用例前提写"手动创建后进入基本信息编辑页"时，**停在本页即可**
-- ⚠️ **点「完成」保存后的落点是周视图**（不是列表页），且**新建的课表名不会作为
-  可点列表项出现**；按"列表页点课名进编辑页"寻路会 BLOCKED
 
 ## 页面-确认页导航关系（拓扑）
 
@@ -345,18 +343,20 @@
   文案「需要权限」+「拍照和导入课程表需要相机权限，请前往设置中开启」/「访问相册和导入
   课程表需要存储权限，请前往设置中开启」，按钮 取消 / 前往设置
 
-## 页面-空课表周视图 `TimetableActivity`
+## 坑-周视图空格子点击
 
-- toolbar 标题 = 课表名，副行 = 当前周数（第N周）
-- 结构 = viewPager + 表头周几（`tv_monday…tv_friday` + `_date`）+
-  recyclerView 网格（`tv_section` 节号 + `tv_time`）
-- 顶栏 `action_curriculum_table_import` / `action_curriculum_table_settings`
 - 空格子 = `cv_empty_content`（clickable）。**点空格 → 直接进添加课程页**，不是弹框
 - ⚠️ **改版：加号中间态已移除**。旧链路「点空格 → 出现加号浮标 `iv_add_hint` → 再点」
   **已不成立**：点空格后连续多次 dump UI 树完全没变、`iv_add_hint` 不存在，
   **第二次**点空格才进添加课程页（第一次点击被"吸收"）
   → 统一走"点一次不成再点一次、命中即停"，**不要再等 `iv_add_hint`**
-  「+」是图无文本/desc，判定用 rid 而非文本
+- 「+」是图无文本/desc，判定用 rid 而非文本
+
+## 周视图结构（断言用）
+
+- toolbar 标题 = 课表名，副行 = 当前周数（第N周）
+- 结构 = viewPager + 表头周几（`tv_monday…tv_friday` + `_date`）+
+  recyclerView 网格（`tv_section` 节号 + `tv_time`）
 
 ## 页面-添加/编辑课程 `EditCourseActivity`
 

@@ -7,24 +7,59 @@ Android 设备黑盒 GUI 测试 v2：**AI 即执行者**。
 操作经验；每步证据自动落盘，最终输出带证据的测试报告。
 
 与 v1（AI 写 Python 用例脚本 → 确定性回放）的区别：**不再写 case**。
-用例就是用户口述的步骤+预期，执行即探索，成功路径的知识沉淀进知识卡/
-链路卡而不是代码。v1 框架时期的日历链路源码已归档至
-`knowledge/_runs/com.zui.calendar/_v1_flow_reference.py` 供参考。
+用例就是用户口述的步骤+预期，执行即探索，成功路径的知识沉淀进**知识卡**
+（坑与行为规律）与**路径图**（在哪找什么）而不是代码。
 
 ## 快速开始
 
+### 一键安装（推荐）
+
 ```powershell
-# 1. 环境（一次）
+pwsh -File scripts/setup.ps1
+```
+
+脚本会依次：检查 adb → 检查设备 → 建 venv 装依赖 → 初始化 uiautomator2 → 自检。
+
+常用参数：
+
+```powershell
+pwsh -File scripts/setup.ps1 -SkipDeviceCheck    # 没插设备也先装依赖
+pwsh -File scripts/setup.ps1 -Recreate           # 重建已存在的 venv
+pwsh -File scripts/setup.ps1 -Python "C:\Python310\python.exe"   # 指定解释器
+```
+
+> **Python 版本要求：3.10 ~ 3.12**
+>
+> - **3.9 不行**：`pillow` 12 起要求 `>=3.10`
+> - **3.13+ 不行**：`rapidocr-onnxruntime` 要求 `<3.13`，装了会直接失败
+> - 3.10 上各依赖均有可用版本；脚本会自动挑出符合要求的解释器
+
+### 手动安装
+
+```powershell
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 adb devices -l                              # 设备在线且已授权
 .venv\Scripts\python -m uiautomator2 init   # 设备端初始化（每台设备一次）
 
-# 2. 看一眼设备当前画面
+# 看一眼设备当前画面
 .venv\Scripts\python tools\observe.py --name smoke/first
 
-# 3. 之后交给 AI：把用例口述给它，它按 SKILL.md 的工作流执行
+# 之后交给 AI：把用例口述给它，它按 SKILL.md 的工作流执行
 ```
+
+启动测试台：
+
+```powershell
+.venv\Scripts\python webui.py               # http://127.0.0.1:9810
+```
+
+> **改过 `scripts/*.ps1` 后跑一次 BOM 校验**：Windows PowerShell 5.1 读无 BOM 的
+> `.ps1` 会按 GBK 解析，中文/emoji 会导致语法崩溃。多数编辑工具重写文件时会
+> 丢掉 BOM，所以改完必查：
+> ```powershell
+> pwsh -File scripts/check_bom.ps1        # 只看；-Fix 自动补回
+> ```
 
 ## 工具层（无流程逻辑，每个都是独立命令）
 
@@ -34,7 +69,7 @@ adb devices -l                              # 设备在线且已授权
 | `tools/act.py` | tap / longclick / input / swipe / back / home / key；`--via` 溯源、`--why` 理由、`--watch` 瞬态弹窗响应、`--settle` 稳定窗口 |
 | `tools/read.py` | OCR 读 toast / Canvas 自绘文字（输出像素 + 归一化坐标） |
 | `tools/state.py` | 设备状态原语：权限 grant/revoke、pm clear、应用启停 |
-| `tools/session.py` | 会话生命周期：start / pause(--ask 问人) / resume / finding / finish / export 链路卡 |
+| `tools/session.py` | 会话生命周期：start / pause(--ask 问人) / resume / finding / finish（PASS 时自动采集路径边）/ case |
 | `tools/logcat.py` | 崩溃/ANR 取证：分级（被测/关联/无关）、自动抓崩溃前 20s 日志 |
 | `tools/vision.py` | 可选视觉通道：OpenAI 兼容多模态模型问图（测试台「视觉模型」页配置） |
 | `tools/cleanup.py` | 证据/日志轮转（--days，防 storage 膨胀） |

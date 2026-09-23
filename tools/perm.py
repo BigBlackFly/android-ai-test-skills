@@ -178,6 +178,20 @@ def detect(d, timeout_s: float = 0.8, interval_s: float = 0.2) -> dict | None:
 DEFAULT_ACTION = "grant"
 
 
+def _frame_signature(info: dict | None) -> str:
+    """给"这一屏"算个简单指纹：申请文案 + 按钮文案。
+
+    只用来判断**点完之后屏幕变了没有**（和人的做法一样：点一下，看有没有反应）。
+    不做"这是不是同一个框"的判断 —— 多权限时按钮全叫「允许」，判不出来。
+    """
+    if not info:
+        return ""
+    parts = [str(info.get("prompt") or "")]
+    for b in info.get("buttons") or []:
+        parts.append(str(b.get("text") if isinstance(b, dict) else b))
+    return "|".join(parts)
+
+
 def handle(d, action: str | None = None, timeout_s: float = 0.8,
            chain_max: int = 8, observe_only: bool = False) -> dict:
     """看见权限框就点，点到框没了为止 —— 和测试员的做法完全一致。
@@ -210,6 +224,10 @@ def handle(d, action: str | None = None, timeout_s: float = 0.8,
         if not btn:
             result["unmatched"] = True  # 框在，但没有可点的匹配项 → 交回 AI
             break
+        # ⚠️ 点完看**框变了没有** —— 和人的做法一样：点一下，看有没有反应。
+        # 变了 = 换成下一个权限/关了；没变 = 点不动（disabled/遮挡），立刻停。
+        # 不做"这是不是同一个框"的判断（多权限时按钮全叫「允许」，判不出来）。
+        before = _frame_signature(info)
         try:
             d.click(*btn["center"])
             result["clicks"].append({"text": btn["text"], "rid": btn["rid"],
@@ -219,4 +237,11 @@ def handle(d, action: str | None = None, timeout_s: float = 0.8,
             result["click_error"] = str(e)
             break
         time.sleep(0.5)                 # 给框内换下一个权限留渲染时间
+        after = detect(d, timeout_s=1.0)
+        if after is None:
+            break                       # 框关了 → 正常结束
+        if _frame_signature(after) == before:
+            # 屏幕内容和点之前一模一样 → 这一下没生效，别再连点（最坏会白等 18s）
+            result["stuck"] = True
+            break
     return result

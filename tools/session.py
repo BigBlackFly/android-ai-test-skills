@@ -37,196 +37,241 @@ def maybe_file(v: str) -> str:
     return v
 
 
-def export_runbook(db, session_id: int, out: str | None) -> str:
-    """把会话事件流提炼成"可回放链路卡"——v2 形态的规划缓存。
+def _parse_path_nodes(text: str) -> list[dict]:
+    """解析路径图，得到每个节点：{name, activity, keys:[(kind,value)], anchors:{...}}。
 
-    内容原则（对齐 SKILL.md 跨设备规则）：
-    - 带 --via 的动作 → 记录**定位意图**（rid/text），这是缓存键，换设备可重定位；
-    - 无 --via 的动作 → 只记坐标并标 ⚠️（机型绑定，回放前必须现场校准）；
-    - 中间的 observe 摘要为检查点（断言依据），不复制节点列表。
-
-    两个真实痛点（回放时才知道）：
-    1. **权限分支意图必须记**：否则回放时不知道该声明 grant 还是 deny，
-       权限框会走错分支 —— 从事件流的 `perm_intent_set` / perm 事件还原。
-    2. **`rid=button1` 是有歧义的定位**：同一个 rid 在不同弹窗里是不同按钮
-       （首次说明框的"同意"、提示框的"知道了"、权限框的"允许/拒绝"）。
-       故额外记下**点击时屏幕上的弹窗标题 + 实际命中按钮文本**，回放据此判断。
+    识别键来自节点里的 `- **识别键**: \\`kind=value\\` · ...` 行（机器可读），
+    用于把采集到的边**归到节点名**（而不是只有裸 activity）。
     """
-    import xml.etree.ElementTree as ET
+    nodes: list[dict] = []
+    cur: dict | None = None
+    for ln in text.splitlines():
+        if ln.startswith("## "):
+            name = ln[3:].strip()
+            if name in ("节点索引（先认自己在哪）", "自动采集的边"):
+                cur = None
+                continue
+            cur = {"name": name, "activity": "", "keys": []}
+            nodes.append(cur)
+            continue
+        if cur is None:
+            continue
+        s = ln.strip()
+        if s.startswith("- **activity**:"):
+            cur["activity"] = s.split(":", 1)[1].strip().strip("`")
+        elif s.startswith("- **识别键**:"):
+            for part in s.split(":", 1)[1].split("·"):
+                p = part.strip().strip("`").strip()
+                if "=" in p:
+                    k, v = p.split("=", 1)
+                    cur["keys"].append((k.strip(), v.strip()))
+    return nodes
 
+
+def _match_node(nodes: list[dict], snapshot_keys: set[str]) -> str:
+    """按「识别键命中数」判定当前落在哪个节点。
+
+    snapshot_keys：当时屏幕上出现过的 `rid=xxx` / `text=xxx` / `desc=xxx`。
+    命中最多者胜；一个都不中就返回空（宁可归不出，也不乱归）。
+    """
+    best, best_n = "", 0
+    for n in nodes:
+        hit = sum(1 for k, v in n["keys"] if f"{k}={v}" in snapshot_keys)
+        if hit > best_n:
+            best, best_n = n["name"], hit
+    return best
+
+
+def apply_pending_paths(only: str | None = None,
+                        package: str | None = None) -> dict:
+    """把 `storage/pending_paths.md` 里的草稿边写入路径图。
+
+    写入位置：路径图末尾的「## 自动采集的边」区（不碰人工整理好的各节点节）——
+    人工节的锚点表带 desc/text 与 ⚠️ 提示，自动边只有 rid/text，混进去反而降质。
+    人看过草稿后，可自行把高频边**手抄进对应节点**。
+    """
+    draft = ROOT / "storage" / "pending_paths.md"
+    if not draft.is_file():
+        return {"ok": False, "error": "没有待确认草稿（先跑 paths 采集）"}
+
+    text = draft.read_text(encoding="utf-8")
+    pkg = package
+    if not pkg:
+        m = re.search(r"app:\s*`([^`]+)`", text)
+        if not m:
+            return {"ok": False, "error": "草稿里没有 app 包名"}
+        pkg = m.group(1)
+    path = ROOT / "knowledge" / "paths" / f"{pkg}.md"
+    if not path.is_file():
+        return {"ok": False, "error": f"路径图不存在：knowledge/paths/{pkg}.md"}
+
+    # 解析草稿里的边：`N. **源** --[锚点]--> **目标**`
+    picks = set()
+    if only:
+        for p in only.split(","):
+            p = p.strip()
+            if p.isdigit():
+                picks.add(int(p))
+    rows: list[tuple[str, str, str]] = []
+    for m in re.finditer(r"^\s*(\d+)\.\s+\*\*(.+?)\*\*\s+--\[(.+?)\]-->\s+\*\*(.+?)\*\*",
+                         text, re.M):
+        idx, a, v, b = int(m.group(1)), m.group(2), m.group(3), m.group(4)
+        if picks and idx not in picks:
+            continue
+        rows.append((a, v, b))
+    if not rows:
+        return {"ok": False, "error": "草稿里没有可应用的边（或 --only 没选中任何一条）"}
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    marker = "## 自动采集的边"
+    if marker not in lines:
+        lines += ["", marker, "",
+                  "<!-- 自动整理、经人确认写入；可手抄进上方节点 -->", ""]
+    existing = set(l.strip() for l in lines)
+    added_lines = []
+    for a, v, b in rows:
+        row = f"- `{a}` --[{v}]--> `{b}`"
+        if row not in existing:
+            added_lines.append(row)
+    if added_lines:
+        lines += added_lines
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # 应用过的边从草稿里删掉，剩下的留着下次确认
+    remaining = []
+    for m in re.finditer(r"^\s*(\d+)\.\s+\*\*(.+?)\*\*\s+--\[(.+?)\]-->\s+\*\*(.+?)\*\*",
+                         text, re.M):
+        if int(m.group(1)) not in {i for i, _ in enumerate(rows, 1)}:
+            remaining.append(m.group(0))
+    # 简化：直接按"是否已写入路径图"判断剩余
+    rest = [r for r in re.findall(
+        r"^\s*\d+\.\s+\*\*(.+?)\*\*\s+--\[(.+?)\]-->\s+\*\*(.+?)\*\*", text, re.M)
+        if f"- `{r[0]}` --[{r[1]}]--> `{r[2]}`" not in set(l.strip() for l in
+                                                           path.read_text(encoding="utf-8").splitlines())]
+    head = [f"# 路径图更新建议（剩余 {len(rest)} 条待确认）", "", f"app: `{pkg}`", "",
+            "> 已应用的不再列出。确认后执行 `python tools/session.py paths-apply`", ""]
+    body = []
+    for i, (a, v, b) in enumerate(rest, 1):
+        body += [f"{i}. **{a}** --[{v}]--> **{b}**", ""]
+    draft.write_text("\n".join(head + body + ["---", ""]), encoding="utf-8")
+
+    return {"ok": True, "package": pkg,
+            "applied": len(added_lines), "skipped_duplicate": len(rows) - len(added_lines),
+            "remaining": len(rest),
+            "path": f"knowledge/paths/{pkg}.md"}
+
+
+def collect_paths(db, session_id: int) -> str | None:
+    """采集本次会话的「路径边」，**生成待确认草稿**（不直接改路径图）。
+
+    记什么（对齐路径图模型）：
+        节点（从哪个落脚点出发）→ 锚点（点了什么控件）→ 节点（到了哪）
+
+    为什么要"草稿 + 确认"：
+        自动采集只能拿到 activity + 点击时的屏幕快照，归节点靠识别键 ——
+        大部分能归对，但边界情况（同 activity 多形态、弹层）需要人扫一眼。
+        所以**先出草稿，人确认后再写入**，而不是自动改卡。
+
+    采集规则（避免噪声）：
+      - 只取带 `via`（点了什么）**且**前后 activity 发生变化的动作 —— 那才是"路径边"；
+      - 同 activity 内的点击（弹菜单/弹窗）不记为页面级跳转；
+      - 无 via 的动作跳过（当时没记定位依据，采不出可信的锚点）。
+    """
     s = db.get_session(session_id)
     if not s:
-        raise SystemExit(f"会话 #{session_id} 不存在")
-    pkg = s.get("package") or "unknown"
-    safe = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", s.get("title") or f"session{session_id}")[:40]
-    path = Path(out) if out else ROOT / "knowledge" / "_runs" / pkg / f"{session_id}_{safe}.md"
+        return None
+    pkg = s.get("package")
+    if not pkg:
+        return None
 
-    def dialog_context(evidence_rel: str | None, prev_intent: str | None) -> str:
-        """取"动作发生时屏幕上的弹窗标题"，用于消解 rid 歧义。
+    path = ROOT / "knowledge" / "paths" / f"{pkg}.md"
+    nodes = _parse_path_nodes(path.read_text(encoding="utf-8")) if path.is_file() else []
 
-        ⚠️ 难点：act 落盘的 dump 是**动作之后**的画面，弹窗可能已被点掉。
-        所以策略是：只有当 dump 里确实存在**弹窗特征**（AlertDialog 类节点 /
-        已知弹窗 rid）时才取标题；否则返回空——**宁可不写，也不写错的**。
-        （早期版本无脑取第一个 title 节点，把页面标题当弹窗标题，误导回放。）
-        """
-        if not evidence_rel:
-            return ""
+    def _snapshot_keys(ev) -> set[str]:
+        """取某次事件落库的**屏幕身份签名**（act 时随事件写入的 `sig`）。"""
         try:
-            xml = (ROOT / evidence_rel).with_name("dump.xml")
-            if not xml.is_file():
-                return ""
-            root = ET.fromstring(xml.read_text(encoding="utf-8"))
-            # 弹窗特征：AlertDialog/弹窗容器类名，或弹窗专用 rid
-            DIALOG_CLS = ("AlertDialog", "Dialog", "PopupWindow")
-            DIALOG_RID_HINT = ("alertTitle", "parentPanel", "buttonPanel",
-                               "button1", "button2", "customPanel")
-            for el in root.iter("node"):
-                a = el.attrib
-                cls = a.get("class", "")
-                rid = a.get("resource-id", "")
-                pkg = a.get("package", "")
-                is_dialog = (any(d in cls for d in DIALOG_CLS)
-                             or any(h in rid for h in DIALOG_RID_HINT))
-                # 系统权限框额外识别（它的包名不是被测 App）
-                if "permissioncontroller" in pkg:
-                    is_dialog = True
-                if not is_dialog:
-                    continue
-                # 在弹窗容器内找标题/正文
-                for sub in el.iter("node"):
-                    sa = sub.attrib
-                    srid = sa.get("resource-id", "")
-                    if srid.endswith(("alertTitle", "message", "dialog_title")):
-                        t = (sa.get("text") or "").strip()
-                        if t:
-                            return t
-            return ""
+            j = json.loads(ev.get("data_json") or "{}")
+        except Exception:  # noqa: BLE001
+            return set()
+        return set(j.get("sig") or [])
+
+    evs = s["events"]
+
+    def _act_of(ev) -> str:
+        try:
+            return (json.loads(ev.get("data_json") or "{}").get("activity") or "")
         except Exception:  # noqa: BLE001
             return ""
 
-    lines = [
-        f"# 链路：{s.get('title') or session_id}",
+    edges: list[tuple[str, str, str]] = []   # (源节点, 锚点, 目标节点)
+    for i, e in enumerate(evs):
+        if e["kind"] != "act":
+            continue
+        data = json.loads(e["data_json"] or "{}")
+        act = data.get("action") or {}
+        via = (act.get("via") or "").strip()
+        if not via:
+            continue                          # 没记定位依据 → 采不出可信锚点
+        # 边 = 「点之前的页面」--[锚点]--> 「点之后的页面」。
+        # 这条 act 自带的 activity 是**点击之后**的，来源要往前找最近一条有 activity 的事件。
+        src_act, src_snap = "", set()
+        for prev in reversed(evs[:i]):
+            a = _act_of(prev)
+            if a:
+                src_act = a
+                src_snap = _snapshot_keys(prev)
+                break
+        dst_act = _act_of(e)
+        if not src_act or not dst_act or src_act == dst_act:
+            continue                          # 同页（弹菜单/弹窗）→ 不是页面级路径边
+        src_node = _match_node(nodes, src_snap) or src_act
+        dst_node = _match_node(nodes, _snapshot_keys(e)) or dst_act
+        edges.append((src_node, via, dst_node))
+    if not edges:
+        return None
+
+    # 去重（同一条边可能多次走到）
+    seen, uniq = set(), []
+    for a, v, b in edges:
+        if a == b:
+            continue          # 自环：归到同一节点（如「图库导入流程」内部的子步骤），不是路径边
+        if (a, v, b) not in seen:
+            seen.add((a, v, b))
+            uniq.append((a, v, b))
+
+    # 已有内容里出现过的**完整边**（源节点 + 锚点 + 目标节点）才跳过。
+    # ⚠️ 不能只拿 via 去搜全文 —— 锚点名（如 rid=iv_more）在卡里到处出现，
+    # 会把所有边都误判成"已存在"（真实缺陷）。
+    existing_txt = path.read_text(encoding="utf-8") if path.is_file() else ""
+    fresh = [(a, v, b) for (a, v, b) in uniq if v not in existing_txt
+             or f"{a}** --[{v}]--> **{b}" not in existing_txt]
+
+    # 写草稿（不直接改路径图 —— 等人确认）
+    draft = ROOT / "storage" / "pending_paths.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    block = [
+        f"# 路径图更新建议（会话 #{session_id}）",
         "",
-        f"- 来源会话: #{session_id}（{s.get('status')}，{s.get('started_at')}）",
-        f"- 包名: {pkg}",
-        f"- 设备: {s.get('device') or '未记录'}",
-        "- 用例口述:",
+        f"app: `{pkg}`　路径图: `knowledge/paths/{pkg}.md`",
         "",
-        "```",
-        s.get("user_input") or "（未记录）",
-        "```",
-        "",
-        "## 步骤",
+        "> 自动整理出的**待确认草稿**，尚未写入路径图。",
+        "> 确认后执行：`python tools/session.py paths-apply --id "
+        f"{session_id}`（或加 `--only 1,3` 只挑几条）",
         "",
     ]
-    n = 0
-    cur_intent: str | None = None       # 当前生效的权限意图（跟随事件流）
-    pending_decl: str | None = None     # 由独立 perm-intent 事件声明、待挂到下一个 act
-    last_ck: str | None = None          # 上一条检查点的 activity（用于去重连续重复）
-    ck_dup = 0                          # 连续重复计数
-    # 误操作关键词：命中的步骤要标"回放可跳过"，否则回放者会照做一次多余的往返
-    _DETOUR = ("误点", "误操作", "绕行", "点错", "走错")
-    for e in s["events"]:
-        data = json.loads(e["data_json"] or "{}")
+    if not fresh:
+        block += ["（本次没有新的边需要补充）", ""]
+    for i, (a, v, b) in enumerate(fresh, 1):
+        block += [f"{i}. **{a}** --[{v}]--> **{b}**", ""]
+    block += ["---", "", "<!-- 本文件每次采集时覆盖重写 -->", ""]
+    draft.write_text("\n".join(block), encoding="utf-8")
 
-        # 权限意图：独立声明的事件（挂到下一个 act 上展示），或 act 顺带声明
-        if e["kind"] == "perm":
-            m = re.search(r"(grant|deny)", e["detail"] or "")
-            if m:
-                cur_intent = m.group(1)
-                pending_decl = m.group(1)     # 标记"下一步是新声明的"
-            continue
-        if isinstance(data.get("perm_intent_set"), dict):
-            cur_intent = data["perm_intent_set"].get("action")
+    if not fresh:
+        return f"无需追加（会话 #{session_id} 的边都已在路径图中）"
+    return (f"草稿已生成 storage/pending_paths.md（{len(fresh)} 条待确认边）；"
+            f"确认后执行 `session.py paths-apply --id {session_id}`")
 
-        if e["kind"] == "act":
-            n += 1
-            act_data = data.get("action", {})
-            via = act_data.get("via")
-            why = act_data.get("why")
-            loc = f"定位 `{via}`" if via else "⚠️坐标直点（回放前现场校准）"
 
-            # 意图声明（两种来源）：顺带声明 or 上一条 perm-intent 命令
-            declared = pending_decl
-            pi_perm = ""
-            if isinstance(data.get("perm_intent_set"), dict):
-                declared = data["perm_intent_set"]["action"]
-                pi_perm = data["perm_intent_set"].get("permission") or ""
-            if declared:
-                loc += (f" ｜ 🎯**声明**权限意图 `{declared}`"
-                        + (f"（{pi_perm}）" if pi_perm else ""))
-                pending_decl = None               # 只标一次
-
-            line = f"{n}. **{e['tool']}** {loc}"
-            if why:
-                line += f" —— {why}"
-
-            # 误操作步骤：AI 如实记进 --why（好习惯），但回放者不该照做一遍多余的往返。
-            # 弯路本身常有含义（如"排序后前 2 个不是节行"），故保留该步 + 标注可跳过。
-            if why and any(k in why for k in _DETOUR):
-                line += "\n   - ↩️ **误操作/弯路，回放可跳过**（保留以示当时的定位教训）"
-
-            # 消解 rid 歧义：只在确认是弹窗时才记标题
-            title = dialog_context(e.get("evidence"), cur_intent)
-            if title:
-                line += f"\n   - 🪟 弹窗：「{title}」"
-
-            # 权限框的实际响应
-            perm = data.get("permission") or {}
-            if perm.get("clicks"):
-                got = ", ".join(c["text"] for c in perm["clicks"])
-                line += f"\n   - 🔐 权限弹窗自动响应：{got}"
-            elif perm.get("detected"):
-                line += f"\n   - 🔐 权限弹窗出现但未点击（可见：{perm.get('buttons')}）"
-
-            if cur_intent and not declared:
-                line += f"\n   - 权限意图（延续）：{cur_intent}"
-
-            # ── 检查点：act 本身就带 activity（动作后的画面），直接当检查点用 ──
-            # ⚠️ 这样「验证类步骤」不必再补一次独立 observe ——
-            # `act --full` 一次调用就同时给了动作 + 全量节点，检查点照样有。
-            # 只有"纯验证步"（该步没有 act）才需要单独 observe。
-            ck = f"activity={data.get('activity')}" if data.get("activity") else ""
-            if ck:
-                if ck == last_ck:
-                    ck_dup += 1
-                    if ck_dup == 1 and any("👁" in x for x in lines[-6:]):
-                        line += f"\n   - 👁 {ck}（与前一步相同，连续重复核对）"
-                else:
-                    last_ck, ck_dup = ck, 0
-                    line += f"\n   - 👁 检查点：{ck}"
-            lines.append(line)
-        elif e["kind"] == "read":
-            lines.append(f"   - 🔍 {e['tool']}：{e['detail']}")
-        elif e["kind"] == "observe":
-            ck = f"activity={data.get('activity')}"
-            if ck == last_ck:
-                # 连续重复的检查点（AI 习惯性"再看一眼"）不重复落行，只累计计数。
-                # ⚠️ 只去重**连续**重复：跨步骤绕一圈回到同一页是有信息量的，不能全局去重。
-                # ⚠️ 也不能让重复看起来像"刻意三重断言"——那等于把坏习惯教给回放者。
-                ck_dup += 1
-                if ck_dup == 1:
-                    lines.append(f"   - 👁 检查点：{ck}（AI 当时在此页连续重复核对）")
-            else:
-                last_ck, ck_dup = ck, 0
-                lines.append(f"   - 👁 检查点：{ck}")
-        elif e["kind"] == "state":
-            lines.append(f"   - ⚙️ {e['detail']}")
-    if s.get("summary"):
-        lines += ["", "## 结论", "", s["summary"]]
-    lines += ["", "## 回放说明",
-              "",
-              "- 按步骤逐条执行，**每步核对返回**；任一步失配（元素找不到/状态不符）",
-              "  → 回退完整 observe→决策流程，跑通后重新 export 覆盖本卡。",
-              "- 带 🎯 的步骤会声明权限意图，照做即可；双分支场景注意两轮之间的 revoke。",
-              "- 带 🪟 的步骤说明当时是弹窗操作，`rid=button1` 之类**不能盲目复用**，",
-              "  要按弹窗标题确认当前是哪一层弹窗。",
-              "- 坐标为当次实测，⚠️ 标记的步骤回放前必须先 observe 校准。",
-              "", f"> 提炼自会话 #{session_id}；回放失配 → 回退全流程并更新本卡。"]
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return str(path)
 
 
 def run_case_cmd(db, args) -> None:
@@ -265,7 +310,24 @@ def run_case_cmd(db, args) -> None:
         else:
             cid = db.add_case(title, s["user_input"], s.get("package"))
             action = "created"
+        # ⚠️ 入库必须**顺手关联会话并计入统计**，否则用例库 run_count/last_status 永远是空的
+        # （真实事故：170 BLOCKED 入库后 run=0 last=None，统计与实际脱节）。
+        # 结果状态**不限于 PASS** —— FAIL / BLOCKED 同样是有效测试结果，必须计入。
+        try:
+            conn = db._conn()
+            conn.execute("UPDATE sessions SET case_id=? WHERE id=?", (cid, args.session))
+            conn.execute(
+                "UPDATE cases SET last_session_id=?, last_status=?, last_run_at=?,"
+                " run_count=(SELECT COUNT(*) FROM sessions WHERE case_id=?), updated_at=?"
+                " WHERE id=?",
+                (args.session, s.get("status"), db._now(), cid, db._now(), cid))
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            print(json.dumps({"ok": False, "error": f"关联失败: {e}"}, ensure_ascii=False))
+            raise SystemExit(1)
         print(json.dumps({"ok": True, "case_id": cid, "action": action,
+                          "run_count": (db.get_case(cid) or {}).get("run_count"),
+                          "last_status": s.get("status"),
                           "hint": "复跑：session.py start --case " + str(cid)},
                          ensure_ascii=False))
 
@@ -303,8 +365,8 @@ def main() -> None:
     s.add_argument("--status", required=True, choices=STATUSES)
     s.add_argument("--summary", default="")
     s.add_argument("--package", default=None)
-    s.add_argument("--no-runbook", action="store_true", dest="no_runbook",
-                   help="PASS 时默认自动沉淀链路卡；加此参数跳过")
+    s.add_argument("--no-paths", action="store_true", dest="no_paths",
+                   help="PASS 时默认采集路径边；加此参数跳过")
     s.add_argument("--id", type=int, default=None,
                    help="收尾指定会话（暂停/等待中的会话已解绑，须用 --id）")
 
@@ -345,9 +407,14 @@ def main() -> None:
     s.add_argument("--show", action="store_true", help="只查看当前意图")
     s.add_argument("--id", type=int, default=None, help="指定会话（默认当前）")
 
-    s = sub.add_parser("export", help="把会话事件流提炼成可回放链路卡（规划缓存）")
-    s.add_argument("--id", type=int, required=True)
-    s.add_argument("--out", default=None, help="输出路径，默认 knowledge/_runs/<包名>/<id>_<标题>.md")
+    s = sub.add_parser("paths", help="采集路径边 → 生成待确认草稿 storage/pending_paths.md")
+    s.add_argument("--id", type=int, default=None)
+
+    s = sub.add_parser("paths-apply",
+                       help="把待确认草稿写入路径图（人确认后执行）")
+    s.add_argument("--only", default=None,
+                   help="只应用草稿里的第几条（如 1,3）；缺省=全部")
+    s.add_argument("--package", default=None, help="目标包名（缺省取草稿里的）")
 
     sub.add_parser("list")
     sub.add_parser("current")
@@ -365,6 +432,24 @@ def main() -> None:
         if not title or not user_input:
             raise SystemExit("需要 --case <id>（复用库中用例）或 --title/--input（新用例，"
                              "中文长文本用 @文件）")
+        # ⚠️ 用例库里已有同一条用例时**当场提示用 --case 复用**：
+        # 早先只在 finish 时提示"尚未进入用例库"，那时会话已结束、提示等于没用
+        # （真实事故：168/169/170 三条都建成了游离会话，用例库统计全不对）。
+        # 匹配用**用例编号**（标题里的「_168」这种），不用全等 ——
+        # 标题后缀常有人手写差异（如「图库导入入口」vs「图库导入课程表」），全等匹配不到。
+        existing_case = None
+        if not args.case_id and title:
+            import re as _re
+            m = _re.search(r"[_\-](\d{2,4})(?!\d)", title)
+            num = m.group(1) if m else None
+            for c in db.list_cases(include_mock=False):
+                ct = (c.get("title") or "").strip()
+                if ct == title.strip():
+                    existing_case = c
+                    break
+                if num and _re.search(rf"[_\-]{num}(?!\d)", ct):
+                    existing_case = c
+                    break
         sid = db.start_session(title, user_input, args.device, case_id=args.case_id,
                                kind="diag" if args.diag else "test")
         set_current(sid)
@@ -399,6 +484,22 @@ def main() -> None:
             out["knowledge_hint"] = hint
             # 只要发出了 hint 就落标记（无卡包也有 system_card 提示，同样别重复发）
             db.mark_knowledge_shown(sid)
+        # 用例库关联提醒：**当场提示**才有用（finish 时才提示＝会话已结束，等于没用）
+        if existing_case:
+            out["case_exists"] = {
+                "case_id": existing_case["id"],
+                "title": existing_case["title"],
+                "run_count": existing_case.get("run_count"),
+                "last_status": existing_case.get("last_status"),
+            }
+            out["case_hint"] = (
+                f"⚠️ 用例库已有同名用例 #{existing_case['id']}（跑过 "
+                f"{existing_case.get('run_count') or 0} 次，上次 {existing_case.get('last_status')}）。"
+                f"**本次未关联它** —— 跑的是同一条就该用 `start --case {existing_case['id']}` 复用；"
+                f"已经开跑了可结束前用 `case save --session {sid}` 关联。")
+        elif not args.case_id:
+            out["case_hint"] = (f"新用例（未关联用例库）。跑完后 `case save --session {sid}` 入库 —— "
+                                f"**PASS / FAIL / BLOCKED 都该入库**（失败与阻断也是测试结果）。")
         print(json.dumps(out, ensure_ascii=False))
     elif args.cmd == "finding":
         sid = args.id if getattr(args, "id", None) else current_session()
@@ -478,15 +579,18 @@ def main() -> None:
             self_check.append(
                 f"⚠️ 本会话因崩溃/ANR 被终止，结论应为 BLOCKED（当前 {args.status}）")
 
-        # PASS 自动沉淀链路卡（回放缓存）。
-        # 只在 PASS 时做：失败会话的链路没有回放价值，导出反而污染知识库。
-        # 有 FAIL 断言时自检会告警、结论通常会被改掉，这里以传入的 status 为准。
-        runbook_path = None
-        if args.status == "PASS" and not fail_n and not getattr(args, "no_runbook", False):
+        # 采集路径边（不再导出步骤序列）。
+        # 为什么换掉：步骤序列是最易腐的知识（换个状态/版本就废），
+        # 而「从哪个落脚点、点什么锚点、到了哪」是耐用的结构。
+        # ⚠️ **不看会话结论**：BLOCKED / FAIL 的会话里，崩溃前走过的路径同样有效
+        # （实测 170 走到最后一步才崩，前面的「导入课程表→图库导入→裁剪→解析」全是真路径）。
+        # 只要有 act 事件就能采出边 —— 早先只采 PASS，白丢了这些。
+        path_note = None
+        if not getattr(args, "no_paths", False):
             try:
-                runbook_path = export_runbook(db, sid, None)
+                path_note = collect_paths(db, sid)
             except Exception as e:  # noqa: BLE001
-                self_check.append(f"⚠️ 链路卡自动导出失败：{e}")
+                self_check.append(f"⚠️ 路径采集失败：{e}")
 
         out = {"ok": ok, "session_id": sid, "crash_events": crash_n,
                "findings": stats, "self_check": self_check,
@@ -495,9 +599,10 @@ def main() -> None:
                         "结论应为 BLOCKED 且报告需附 crash.log 证据路径；"
                         "无关包崩溃仅需在报告中说明")
                if crash_n else "无崩溃事件"}
-        if runbook_path:
-            out["runbook"] = runbook_path
-            out["note"] = "已自动沉淀链路卡（复跑时按卡逐步执行，失配则回退全流程）"
+        if path_note:
+            out["paths_collected"] = path_note
+            out["note"] = ("已采集路径边到 knowledge/paths/<包名>.md"
+                           "（落脚点 + 锚点 + 去向；下次操作可直接查，不用探索）")
         print(json.dumps(out, ensure_ascii=False))
     elif args.cmd == "case":
         run_case_cmd(db, args)
@@ -531,9 +636,14 @@ def main() -> None:
                                        f"【{'同意' if args.action == 'grant' else '拒绝'}】"
                                        f"；分支测完请 perm-intent --clear")},
                              ensure_ascii=False))
-    elif args.cmd == "export":
-        path = export_runbook(db, args.id, args.out)
-        print(json.dumps({"ok": True, "path": path}, ensure_ascii=False))
+    elif args.cmd == "paths":
+        # 手动采集某会话的路径边 → 草稿（finish 时已自动做）
+        note = collect_paths(db, args.id if getattr(args, "id", None) else current_session())
+        print(json.dumps({"ok": bool(note), "paths": note}, ensure_ascii=False))
+    elif args.cmd == "paths-apply":
+        print(json.dumps(apply_pending_paths(
+            only=getattr(args, "only", None),
+            package=getattr(args, "package", None)), ensure_ascii=False))
     elif args.cmd == "list":
         print(json.dumps(db.list_sessions(20), ensure_ascii=False, indent=2))
     elif args.cmd == "current":

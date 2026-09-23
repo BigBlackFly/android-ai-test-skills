@@ -643,7 +643,16 @@ class SessionDB:
             params = (kind,)
         sql += " ORDER BY s.id DESC LIMIT ?"
         rows = self._conn().execute(sql, params + (limit,)).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        # 「回放」入口是否可用：该会话至少有一帧的截图还在磁盘上。
+        # ⚠️ 证据可能被 cleanup 轮转或误删 —— 那时按钮要置灰，而不是点进去才发现播不了。
+        # 放在这里统一算（列表页要按行显示），避免前端为每条记录各发一次请求。
+        for r in out:
+            evs = self._conn().execute(
+                "SELECT evidence FROM events WHERE session_id=? AND evidence IS NOT NULL"
+                " AND evidence != '' LIMIT 50", (r["id"],)).fetchall()
+            r["has_evidence"] = any((ROOT / e["evidence"]).is_file() for e in evs)
+        return out
 
     def session_kind_counts(self) -> dict:
         """各类型会话数（测试记录页「显示验证记录」开关用）。

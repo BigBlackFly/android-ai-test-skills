@@ -140,6 +140,62 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not found"}, 404)
         self._send(200, fp.read_bytes(), MIME.get(fp.suffix, "application/octet-stream"))
 
+    def _replay(self, sid: int):
+        """回放数据：把会话里有截图的事件串成"帧"。
+
+        每帧 = {evidence(图片), x/y(点击坐标，仅动作有), size(原图尺寸),
+                kind, action, via, why, detail, ts}
+
+        ⚠️ **坐标换算交给前端按百分比做**：这里给的是**原图坐标系**的 x/y 和
+        size，前端用 `left = x/size_w*100%` 定位 —— 这样图片无论被 CSS
+        缩放成多大，圆点都不会偏。
+        """
+        s = get_db().get_session(sid)
+        if not s:
+            return self._json({"error": "not found"}, 404)
+
+        frames = []
+        for e in s.get("events") or []:
+            ev = e.get("evidence")
+            if not ev:
+                continue
+            try:
+                j = json.loads(e.get("data_json") or "{}")
+            except ValueError:
+                j = {}
+            act = j.get("action") or {}
+            size = j.get("size") or []
+            # action 字段可能没存（历史数据），从 detail 首段回退（如"点击 (x,y) via ..."）
+            action = act.get("action") or ""
+            if not action and e.get("detail"):
+                action = str(e["detail"]).split(" ")[0]
+            frames.append({
+                "seq": e.get("seq"),
+                "kind": e.get("kind"),
+                "evidence": ev,
+                "x": act.get("x"),
+                "y": act.get("y"),
+                "size": size if len(size) == 2 else None,
+                "action": action,
+                "via": act.get("via") or "",
+                "why": act.get("why") or "",
+                "detail": e.get("detail") or "",
+                # 图还在不在（被 cleanup 轮转/误删后为 False）
+                "ok": (ROOT / ev).is_file(),
+            })
+
+        missing = sum(1 for f in frames if not f["ok"])
+        return self._json({
+            "session_id": sid,
+            "title": s.get("title") or f"会话 #{sid}",
+            "status": s.get("status"),
+            "frames": frames,
+            "total": len(frames),
+            "missing": missing,
+            # 一张可用的图都没有 → 前端把回放入口置灰
+            "playable": any(f["ok"] for f in frames),
+        })
+
     def _storage_file(self, relpath: str):
         """伺服 storage 下的证据文件。
 
@@ -206,6 +262,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             c = get_db().get_case(int(m.group(1)))
             return self._json(c if c else {"error": "not found"}, 200 if c else 404)
+
+        m = re.match(r"^/api/sessions/(\d+)/replay$", path)
+        if m:
+            return self._replay(int(m.group(1)))
 
         m = re.match(r"^/api/sessions/(\d+)$", path)
         if m:

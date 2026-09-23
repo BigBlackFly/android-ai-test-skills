@@ -46,6 +46,17 @@ function fmtDuration(sec) {
   return `${s}秒`;
 }
 
+// 详情接口只给 started_at/finished_at（没有 duration_seconds），现场算一个。
+// 未收尾的会话（finished_at 为空）算到"此刻"。
+function durationOf(s) {
+  if (s.duration_seconds != null) return s.duration_seconds;
+  const a = Date.parse(s.started_at);
+  if (isNaN(a)) return null;
+  const b = s.finished_at ? Date.parse(s.finished_at) : Date.now();
+  if (isNaN(b)) return null;
+  return (b - a) / 1000;
+}
+
 /* 状态中文标签（判定规则见 SKILL.md） */
 const statusCN = {
   PASS: "通过", FAIL: "失败", WARN: "警告",
@@ -342,6 +353,9 @@ async function viewSessions() {
           <span class="c-dur">${fmtDuration(s.duration_seconds)}</span>
           <span class="c-cnt">${s.event_count} / ${s.finding_count}</span>
           <span class="c-act">
+            <button class="ghost sm" data-replay="${s.id}"
+              ${s.has_evidence ? "" : "disabled"}
+              title="${s.has_evidence ? "回放本次执行的轨迹（截图串播）" : "该记录没有可用的截图，无法回放"}">▶ 回放</button>
             <button class="ghost sm danger" data-del="${s.id}" title="删除该记录及其截图/日志">删除</button>
           </span>
         </div>`).join("") || "<div class='lt-empty'>还没有记录。用 <code>session.py start</code> 开启会话后由 AI 执行用例。</div>"}
@@ -355,6 +369,11 @@ async function viewSessions() {
     el.addEventListener("click", ev => {
       ev.stopPropagation();          // 不能触发"点击查看"
       confirmDeleteSession(el.dataset.del);
+    }));
+  $$("[data-replay]", main).forEach(el =>
+    el.addEventListener("click", ev => {
+      ev.stopPropagation();
+      replaySession(el.dataset.replay);
     }));
 }
 
@@ -390,10 +409,136 @@ function toast(msg) {
   setTimeout(() => el.remove(), 2600);
 }
 
+// ── 轨迹回放：把会话的截图串起来播，点击位置画圆点 ──────────────
+// 不用录屏、不合成视频 —— 直接用已有截图当"简易录屏"。
+// ⚠️ 坐标换算：x/y 是**原图坐标系**（size 是原图尺寸），
+//    用百分比 `x/size_w*100%` 定位 → 图片被 CSS 缩成多大都不会偏。
+async function replaySession(id) {
+  let data;
+  try {
+    data = await api(`/api/sessions/${id}/replay`);
+  } catch (e) {
+    toast(`回放数据加载失败：${e.message}`);
+    return;
+  }
+  if (!data || !data.total) {
+    toast("这条记录没有可回放的截图");
+    return;
+  }
+
+  const m = modal(`轨迹回放 · ${data.title}`, `
+    <div class="rp">
+      <div class="rp-stage">
+        <img class="rp-img" alt="帧">
+        <div class="rp-dot hidden"></div>
+        <div class="rp-gone hidden">🖼 该帧的截图已清理</div>
+      </div>
+      <div class="rp-sub"></div>
+      <div class="rp-bar">
+        <button class="ghost" data-rp="prev" title="上一帧">⏮</button>
+        <button class="ghost rp-play" data-rp="play" title="播放/暂停">▶</button>
+        <button class="ghost" data-rp="next" title="下一帧">⏭</button>
+        <input class="rp-range" type="range" min="1" max="${data.total}" value="1">
+        <span class="rp-count">1 / ${data.total}</span>
+        <select class="rp-speed">
+          <option value="2000">0.5×</option>
+          <option value="1000" selected>1×</option>
+          <option value="500">2×</option>
+          <option value="250">4×</option>
+        </select>
+      </div>
+      ${data.missing ? `<div class="rp-warn">⚠️ ${data.missing} 帧的截图已被清理，播放时显示占位</div>` : ""}
+    </div>`);
+  m.el.querySelector(".modal").classList.add("rp-modal");   // 宽版，图才看得清
+
+  const img = $(".rp-img", m.el);
+  const dot = $(".rp-dot", m.el);
+  const sub = $(".rp-sub", m.el);
+  const gone = $(".rp-gone", m.el);
+  const range = $(".rp-range", m.el);
+  const count = $(".rp-count", m.el);
+  const playBtn = $(".rp-play", m.el);
+  const speedSel = $(".rp-speed", m.el);
+
+  let i = 0;
+  let timer = null;
+
+  function show(n) {
+    i = Math.max(0, Math.min(data.total - 1, n));
+    const f = data.frames[i];
+    range.value = i + 1;
+    count.textContent = `${i + 1} / ${data.total}`;
+
+    // 图片缺失时不留破图；**舞台尺寸保持不变**（靠 CSS 的 aspect-ratio），
+    // 否则整块会塌成一条，看着像页面坏了。
+    // ⚠️ 用 `.hidden` class（项目约定，带 !important）而不是 `el.hidden` 属性 ——
+    // 属性会被作者样式里的 display 盖掉（真实缺陷：图在却显示"已清理"占位）。
+    gone.classList.toggle("hidden", !!f.ok);
+    // ⚠️ 用 visibility 而非 display：display:none 会让 img 不占位、舞台塌掉
+    img.style.visibility = f.ok ? "visible" : "hidden";
+    if (f.ok) img.src = `/files/${f.evidence}`;
+    if (f.size) $(".rp-stage", m.el).style.aspectRatio = `${f.size[0]} / ${f.size[1]}`;
+
+    // 点击位置圆点：用**百分比**换算，图片缩放多少都准
+    const [w, h] = f.size || [];
+    const hasDot = f.ok && w && h && f.x != null && f.y != null;
+    dot.classList.toggle("hidden", !hasDot);
+    if (hasDot) {
+      dot.style.left = `${(f.x / w) * 100}%`;
+      dot.style.top = `${(f.y / h) * 100}%`;
+    }
+
+    // 字幕条（在图下方，**不遮挡画面**）
+    const parts = [`<span class="rp-sub-n">第 ${f.seq} 步</span>`];
+    if (f.kind === "act") {
+      parts.push(`<b>${esc(f.action || "操作")}</b>`);
+      if (f.x != null) parts.push(`<code>${f.x}, ${f.y}</code>`);
+      if (f.via) parts.push(`<code>${esc(f.via)}</code>`);
+      if (f.why) parts.push(esc(f.why));
+    } else {
+      parts.push(`<b>${esc(f.kind)}</b>`);
+      if (f.detail) parts.push(esc(f.detail));
+    }
+    sub.innerHTML = parts.join('<span class="rp-sep">·</span>');
+  }
+
+  function stop() {
+    if (timer) { clearInterval(timer); timer = null; }
+    playBtn.textContent = "▶";
+  }
+  function play() {
+    if (timer) { stop(); return; }
+    playBtn.textContent = "⏸";
+    const tick = () => {
+      if (i >= data.total - 1) { stop(); return; }
+      show(i + 1);
+    };
+    timer = setInterval(tick, Number(speedSel.value));
+  }
+
+  $("[data-rp='prev']", m.el).addEventListener("click", () => { stop(); show(i - 1); });
+  $("[data-rp='next']", m.el).addEventListener("click", () => { stop(); show(i + 1); });
+  playBtn.addEventListener("click", play);
+  range.addEventListener("input", () => { stop(); show(Number(range.value) - 1); });
+  speedSel.addEventListener("change", () => { if (timer) { stop(); play(); } });
+
+  // 键盘：← → 翻帧，空格播放/暂停
+  const onKey = ev => {
+    if (!document.body.contains(m.el)) { document.removeEventListener("keydown", onKey); return; }
+    if (ev.key === "ArrowLeft") { stop(); show(i - 1); }
+    else if (ev.key === "ArrowRight") { stop(); show(i + 1); }
+    else if (ev.key === " ") { ev.preventDefault(); play(); }
+  };
+  document.addEventListener("keydown", onKey);
+
+  const origClose = $(".modal-x", m.el);
+  origClose.addEventListener("click", stop);
+  show(0);
+}
+
 async function viewSession(id) {
   main.innerHTML = "<div class='sub'>加载中…</div>";
-  const s = await api(`/api/sessions/${id}`);
-  const kindLabel = { observe: "👁 观察", act: "✋ 操作", read: "🔍 读取",
+  const s = await api(`/api/sessions/${id}`);  const kindLabel = { observe: "👁 观察", act: "✋ 操作", read: "🔍 读取",
                       ask: "❓ 问人", pause: "⏸ 暂停", note: "📝 备注",
                       state: "⚙️ 状态", logcat: "📎 取证", crash: "💥 崩溃" };
 
@@ -415,13 +560,17 @@ async function viewSession(id) {
   };
   const scopeLabel = { target: "被测包", related: "关联包", other: "其他包" };
   const fmtGap = sec => sec >= 60 ? `${Math.floor(sec / 60)}m${Math.round(sec % 60)}s` : `${sec.toFixed(1)}s`;
+  // 有无可回放的截图（图可能被 cleanup 轮转掉）→ 决定回放按钮是否可点
+  const hasEv = (s.events || []).some(e => e.evidence);
 
   main.innerHTML = `
     <button class="ghost back">← 返回列表</button>
+    <button class="ghost" data-replay="${s.id}" ${hasEv ? "" : "disabled"}
+      title="${hasEv ? "回放本次执行的轨迹（截图串播）" : "该记录没有可用的截图，无法回放"}">▶ 回放轨迹</button>
     <div class="detail-head">
       <h1>${esc(s.title || `会话 #${s.id}`)} ${statusChip(s.status)}</h1>
       <div class="meta">模块 ${esc(s.package || "—")} · 设备 ${esc(s.device || "—")} ·
-        开始 ${esc(fmtTime(s.started_at))} → 结束 ${esc(fmtTime(s.finished_at))} · 耗时 ${fmtDuration(s.duration_seconds)}</div>
+        开始 ${esc(fmtTime(s.started_at))} → 结束 ${esc(fmtTime(s.finished_at))} · 耗时 ${fmtDuration(durationOf(s))}</div>
       ${s.user_input ? `<div class="quote">用例口述：${esc(s.user_input)}</div>` : ""}
       <div class="findings">
         ${s.findings.map(f => `
@@ -464,7 +613,10 @@ async function viewSession(id) {
             const ev = e.evidence;
             if (!ev) return "";
             if (ev.endsWith(".png") || ev.endsWith(".jpg") || ev.endsWith(".jpeg"))
-              return `<img class="shot" loading="lazy" src="/files/${esc(ev)}">`;
+              // ⚠️ 图可能已被清理（cleanup.py 轮转 / 手工删除）——那时别留个破图，
+              // 给个"证据已清理"的占位，记录与文本结果照常保留。
+              return `<img class="shot" loading="lazy" src="/files/${esc(ev)}"
+                onerror="this.outerHTML='<div class=&quot;ev-gone&quot;>🖼 证据已清理（${esc(ev.split("/").pop())}）</div>'">`;
             const name = ev.split("/").pop();
             const dl = e.kind === "logcat" || ev.endsWith(".log");
             return `<div class="ev-file">📎 <a href="/files/${esc(ev)}"
@@ -474,6 +626,8 @@ async function viewSession(id) {
       }).join("") || "<span class='muted'>无事件</span>"}
     </div>`;
   $(".back", main).addEventListener("click", viewSessions);
+  const rpBtn = $("[data-replay]", main);
+  if (rpBtn) rpBtn.addEventListener("click", () => replaySession(s.id));
   $$("img.shot", main).forEach(img =>
     img.addEventListener("click", () => {
       $("#lightbox-img").src = img.src;
