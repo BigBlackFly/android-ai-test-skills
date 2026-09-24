@@ -59,12 +59,12 @@ adb devices -l                              # 设备在线且已授权
 ## 目录
 
 ```
-├── SKILL.md        # 工具说明书（AI 按需加载）
-├── tools/          # 薄工具层
+├── SKILL.md         # 工具说明书（AI 按需加载）
+├── tools/           # 薄工具层
 ├── media-resources/ # 会话准备使用的图片和视频
-├── uiux-reference/ # 测试期间只读；按包名组织的 UIUX 页面、局部图及来源
-├── knowledge/      # App 知识卡（按包名，按交互类型组织）
-├── webui/          # 测试台前端（会话时间线 / 知识库编辑）
-├── webui.py        # 测试台服务（标准库，零依赖）
-└── storage/        # 运行产物：evidence/ 证据、sessions.db 记录
+├── uiux/            # 测试期间只读；按包名组织的 UIUX 页面、局部图及来源
+├── knowledge/       # App 知识卡（按包名，按交互类型组织）
+├── webui/           # 测试台前端（会话时间线 / 知识库编辑）
+├── webui.py         # 测试台服务（标准库，零依赖）
+└── storage/         # 运行产物：evidence/ 证据、sessions.db 记录
 ```

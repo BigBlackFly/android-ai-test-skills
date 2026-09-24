@@ -1,13 +1,13 @@
 # 测试中使用 UIUX 知识
 
-Agent 可以按需读取 `uiux-reference/`目录下的 UIUX 设计知识，并查阅 `knowledge/`目录下的测试经验。Agent 应当围绕当前用例涉及的页面和交互逐步查询和加载。
+Agent 可以按需读取 `uiux/`目录下的 UIUX 设计知识，并查阅 `knowledge/`目录下的测试经验。Agent 应当围绕当前用例涉及的页面和交互逐步查询和加载。
 
 ## 入口与组织
 
-UIUX 知识库的总入口为 [uiux-reference/README.md](../uiux-reference/README.md)。App 目录以 Android 包名组织；当前入口为[图库（com.zui.gallery）](../uiux-reference/apps/com.zui.gallery/README.md)和[系统设置（com.zui.settings）](../uiux-reference/apps/com.zui.settings/README.md)。
+UIUX 知识库的总入口为 [uiux/README.md](../uiux/README.md)。App 目录以 Android 包名组织；当前入口为[图库（com.zui.gallery）](../uiux/apps/com.zui.gallery/README.md)和[系统设置（com.zui.settings）](../uiux/apps/com.zui.settings/README.md)。
 
 ```text
-uiux-reference/
+uiux/
   README.md                    # App、包名和资料入口
   apps/<包名>/
     README.md                  # 页面与跨页主题索引
@@ -37,7 +37,7 @@ uiux-reference/
 
 ## 资料职责
 
-- `uiux-reference/` 保存设计预期，在测试期间保持只读。索引、正文、配图和来源由知识库维护者维护。
+- `uiux/` 保存设计预期，在测试期间保持只读。索引、正文、配图和来源由知识库维护者维护。
 - `knowledge/` 保存实际测试中积累的操作经验。成功的执行链路保存到 `knowledge/_runs/`。
 - 测试断言使用当前设备证据，并以用户用例为验收依据。
 - 设计资料中的版本标记、适用条件、占位图和待确认事项随正文保留。图像细节通过对应配图核对。
