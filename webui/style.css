@@ -189,7 +189,78 @@ code {
   background: var(--card);
 }
 .shot:hover { border-color: var(--accent); }
+/* 证据已被清理时的占位（图片 404）——不显示破图 */
+.ev-gone {
+  display: inline-block; margin-top: 8px; padding: 10px 14px;
+  font-size: 12.5px; color: var(--muted);
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: var(--card);
+}
 .ev-file { margin-top: 8px; font-size: 12.5px; }
+
+/* 回放用的宽版弹窗。
+   ⚠️ **限宽而不限高**：舞台必须保持原图比例，圆点按百分比定位才准
+   （给舞台加 max-height 会让 object-fit 留白 → 圆点偏移，已踩过）。
+   所以改为按视口反推宽度：取"92vw"与"按高度算出的可用宽"中的较小值。
+
+   高度账（实测）：图之外还有 头 ~58 + 字幕 ~50 + 播控 ~44 + 内边距 ~32 ≈ 184px。
+   要总高 ≤ 88vh → 图高 ≤ 88vh - 184px → 宽 ≤ (88vh - 184px) × 3040/1904。
+   min() 里可以直接写这个算式（CSS 支持在 calc 里混用 vh 与 px）。 */
+.modal.rp-modal {
+  width: min(1100px, 92vw, calc((88vh - 184px) * 3040 / 1904));
+}
+
+/* ── 轨迹回放（截图串播 + 点击位置遮罩）── */
+.rp { display: flex; flex-direction: column; gap: 10px; }
+/* 舞台：黑底 + 固定宽高比（宽高比与原图一致）。
+   ⚠️ 不要再给 max-height 之类的额外限高 —— 一旦舞台比例与图不一致，
+   `object-fit: contain` 会在框内留白，而圆点是按**框**的百分比定位的，
+   位置就会偏（真实缺陷：限高后圆点对不上）。舞台只保持原图比例，让它自己缩放。 */
+.rp-stage {
+  position: relative;                 /* 圆点按百分比定位在图上 */
+  background: #111; border-radius: 10px; overflow: hidden;
+  aspect-ratio: 3040 / 1904;          /* 占位默认值，JS 会按实际帧覆盖 */
+  line-height: 0;                     /* 去掉 img 下方缝隙 */
+}
+.rp-img { width: 100%; height: 100%; display: block; object-fit: contain; }
+/* 遮罩层上的点击圆点：百分比定位 → 图缩放多少都准。
+   半透明填充，能透出下面的界面内容。 */
+.rp-dot {
+  position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+  border-radius: 50%; pointer-events: none;
+  border: 2px solid rgba(255, 59, 48, .85);
+  background: rgba(255, 59, 48, .18);
+  box-shadow: 0 0 0 3px rgba(255, 59, 48, .10);
+  animation: rp-pulse 1.1s ease-out infinite;
+}
+@keyframes rp-pulse {
+  0%   { box-shadow: 0 0 0 2px rgba(255, 59, 48, .22); }
+  100% { box-shadow: 0 0 0 10px rgba(255, 59, 48, 0); }
+}
+/* 字幕条：在图**下方**，不遮挡画面 */
+.rp-sub {
+  padding: 9px 14px; border-radius: 8px; background: var(--card);
+  border: 1px solid var(--border);
+  font-size: 13px; line-height: 1.7; min-height: 40px;
+  word-break: break-all;
+}
+.rp-sub-n {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  background: var(--accent); color: #fff; font-size: 12px;
+}
+.rp-sub code { background: rgba(128, 128, 128, .18); padding: 1px 6px; border-radius: 4px; }
+.rp-sep { margin: 0 7px; opacity: .38; }
+.rp-gone {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; color: var(--muted); font-size: 14px;
+}
+.rp-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rp-range { flex: 1; min-width: 160px; accent-color: var(--accent); }
+.rp-count { font-size: 12.5px; color: var(--muted); min-width: 68px; text-align: right; }
+.rp-speed { font-size: 12.5px; padding: 3px 6px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--card); color: inherit; }
+.rp-warn { font-size: 12.5px; color: #b8860b; }
+button[disabled] { opacity: .45; cursor: not-allowed; }
 .ev-file a { color: var(--accent); text-decoration: none; }
 .ev-file a:hover { text-decoration: underline; }
 

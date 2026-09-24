@@ -59,7 +59,21 @@ def knowledge_hint(package: str | None, shown: bool = False) -> dict | None:
     if not package or shown:
         return None
     card = ROOT / "knowledge" / f"{package}.md"
-    if not card.is_file():
+    path_map = ROOT / "knowledge" / "paths" / f"{package}.md"
+    # 路径图节点（落脚点），有就一并给出 —— 它才是"先定位，再找出边"的入口
+    path_nodes: list[str] = []
+    # 这些小节不是落脚点，是路径图的辅助段，别混进节点索引
+    _NOT_NODES = ("节点索引", "自动采集的边", "说明", "索引", "同 rid 多态")
+    if path_map.is_file():
+        try:
+            for line in path_map.read_text(encoding="utf-8").splitlines():
+                if line.startswith("## "):
+                    name = line[3:].strip()
+                    if name and not any(k in name for k in _NOT_NODES):
+                        path_nodes.append(name)
+        except OSError:
+            pass
+    if not card.is_file() and not path_nodes:
         return {
             "card": None,
             "system_card": "knowledge/_system.md",
@@ -67,20 +81,26 @@ def knowledge_hint(package: str | None, shown: bool = False) -> dict | None:
                     "卸载恢复）看 knowledge/_system.md"),
         }
     sections: list[str] = []
-    try:
-        for line in card.read_text(encoding="utf-8").splitlines():
-            if line.startswith("## "):
-                sections.append(line[3:].strip())
-    except OSError:
-        pass
-    return {
-        "card": f"knowledge/{package}.md",
+    if card.is_file():
+        try:
+            for line in card.read_text(encoding="utf-8").splitlines():
+                if line.startswith("## "):
+                    sections.append(line[3:].strip())
+        except OSError:
+            pass
+    out: dict = {
+        "card": f"knowledge/{package}.md" if card.is_file() else None,
         "sections": sections,
-        "tip": ("执行前先读本卡：按交互类型关键词检索命中标题，"
-                "只读对应小节（不要整卡读）。卡里是跨设备实测经验，"
-                "含标准链路与已踩过的坑。"),
+        "tip": ("**执行前先定位**：路径图是节点图（节点=落脚点，边=认什么锚点→去哪）。"
+                "先认自己在哪个节点（看 activity + 屏幕上有什么），再检索该节点的出边。"
+                "知识卡是坑与行为规律（按交互类型词检索命中标题，只读对应小节）。"),
         "system_card": "knowledge/_system.md",
     }
+    if path_nodes:
+        out["path_map"] = f"knowledge/paths/{package}.md"
+        # 字段名直说用途：这是"节点索引"，供先定位、再 grep 对应节
+        out["nodes"] = path_nodes
+    return out
 
 
 def auto_name() -> str:
@@ -233,6 +253,138 @@ def capture(d: "u2.Device", png: Path, xml: Path, meta: Path,
 # ---------- dump 摘要 ----------
 
 _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+def npm_identity(xml_text: str, fg_package: str | None = None,
+                 limit: int = 80) -> list[str]:
+    """给一屏算一个**身份签名**：页面上出现过的 `kind=value` 短串集合。
+
+    用途：事后自动整理路径边时，判断"这一步落在路径图的哪个节点"
+    （路径图节点带「识别键」，形如 `rid=btnCreateManually` / `text=全部课程表`）。
+
+    为什么存签名而不是存 nodes：签名是几十个短串（可随事件落库），
+    nodes 是上百个对象（落库太占地方）。
+    """
+    import xml.etree.ElementTree as ET
+    out: list[str] = []
+    seen: set[str] = set()
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:  # noqa: BLE001
+        return out
+    for el in root.iter("node"):
+        a = el.attrib
+        if fg_package and a.get("package") and a.get("package") != fg_package:
+            continue
+        rid = (a.get("resource-id") or "").split("/")[-1]
+        if rid and f"rid={rid}" not in seen:
+            seen.add(f"rid={rid}")
+            out.append(f"rid={rid}")
+        t = (a.get("text") or "").strip()
+        if t and f"text={t}" not in seen:
+            seen.add(f"text={t}")
+            out.append(f"text={t}")
+        d = (a.get("content-desc") or "").strip()
+        if d and f"desc={d}" not in seen:
+            seen.add(f"desc={d}")
+            out.append(f"desc={d}")
+        if len(out) >= limit:
+            break
+    return out
+
+
+def labeled_nodes(xml_text: str, fg_package: str | None = None) -> list[tuple]:
+    """取页面上**有文字的节点**位置：[(center, text), ...]。
+
+    用途：给 `next_targets` 做"子节点文字冒泡" —— 可点容器自己没有文字时，
+    用这些文字的位置反查它属于哪个可点节点。
+    """
+    import xml.etree.ElementTree as ET
+    out = []
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:  # noqa: BLE001
+        return out
+    for el in root.iter("node"):
+        a = el.attrib
+        if fg_package and a.get("package") and a.get("package") != fg_package:
+            continue
+        t = (a.get("text") or "").strip()
+        if not t:
+            continue
+        m = _BOUNDS_RE.search(a.get("bounds", ""))
+        if not m:
+            continue
+        x1, y1, x2, y2 = map(int, m.groups())
+        out.append(((x1 + x2) // 2, (y1 + y2) // 2, t))
+    return out
+
+
+def next_targets(nodes: list[dict], limit: int = 12,
+                 labeled: list[tuple] | None = None) -> list[dict]:
+    """从 nodes 里挑出"下一步最可能点的目标"，给一份**精简可点清单**。
+
+    ⚠️ 为什么需要（真实教训，被同一个人纠正多次）：
+    AI 的执行循环常变成「act → observe 拿坐标 → act → observe …」——
+    但它其实**不需要**额外 observe：act 返回的 nodes 就是动作后的画面。
+    多一次 observe = 工具 2s + 决策等待 10~15s，纯粹浪费。
+
+    根因是"下一个目标是什么/在哪"要在一大坨 nodes 里翻，太费劲 →
+    干脆另起一次 observe。本函数把这件事变便宜：**直接给精简可点清单**。
+
+    兼容两种 nodes 格式：
+      - nav 模式（短键 i/t/r/c/s）：**本身就是可点/可滑动集合**，全部算候选
+      - full 模式（完整键 + clickable）：只取 clickable 的
+
+    `labeled`：`[(center, text), ...]` —— 页面上的**文字节点**位置。
+    可点容器常常自己没有文字（文字在子节点里，如菜单项、列表行），
+    此时用**空间包含**把子节点文字认领给该可点节点（冒泡），
+    否则清单里会出现一堆"没有标签只有坐标"的项，AI 仍得回去翻 nodes。
+    """
+    def _bubble(c) -> str:
+        """找出位于该可点节点范围内的文字（取最长的一条）。"""
+        if not labeled:
+            return ""
+        cx, cy = c[0], c[1]
+        best = ""
+        for lx, ly, lt in labeled:
+            # 文字中心落在可点节点附近（容器通常比文字大，用宽容的邻近判定）
+            if abs(lx - cx) <= 400 and abs(ly - cy) <= 80 and len(lt) > len(best):
+                best = lt
+        return best
+
+    cands = []
+    seen = set()
+    for n in nodes:
+        # nav 模式没有 clickable 字段（短键格式本身就是筛选过的），full 模式才判
+        if "clickable" in n and not n.get("clickable"):
+            continue
+        c = n.get("center") or n.get("c")
+        if not c:
+            continue
+        text = n.get("text") or n.get("t") or ""
+        desc = n.get("desc") or ""
+        rid = n.get("rid") or n.get("r") or ""
+        if not text and not desc:
+            text = _bubble(c)          # 容器无文字 → 从子节点冒泡
+        key = (tuple(c), text, rid)
+        if key in seen:
+            continue
+        seen.add(key)
+        # 有语义的优先；三无的（纯容器/无描述图标）排后
+        score = (3 if text else 0) + (2 if desc else 0) + (1 if rid else 0)
+        item = {"c": list(c)}
+        if text:
+            item["t"] = text
+        if desc:
+            item["d"] = desc
+        if rid:
+            item["r"] = rid.split("/")[-1]
+        if n.get("scrollable") or n.get("s"):
+            item["s"] = True
+        cands.append((score, item))
+    cands.sort(key=lambda x: -x[0])
+    return [c[1] for c in cands[:limit]]
 
 
 # 装饰性系统界面：状态栏 / 导航栏 / 桌面 taskbar。

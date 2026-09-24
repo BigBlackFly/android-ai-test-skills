@@ -4,9 +4,15 @@
 按**文件**自身 mtime 判断（目录 mtime 只在增删子项时变，按目录判会误删
 正在写入的活跃证据）；当前会话的证据目录整目录跳过。
 
+⚠️ **别手工 `Remove-Item storage/evidence/<目录>`** —— 数据库里的事件仍引用那些
+图，删了之后记录页会全是空白（真实事故：清理临时目录时连已入库会话的证据一起删了）。
+要删请走 `--rm-dir`，它会**先查数据库引用**，被引用就拒绝。
+
 用法：
-  python cleanup.py --days 7          # 删 7 天前的 evidence/ 与 logs/
-  python cleanup.py --days 7 --dry    # 只报告将删什么
+  python cleanup.py --days 7              # 删 7 天前的 evidence/ 与 logs/
+  python cleanup.py --days 7 --dry        # 只报告将删什么
+  python cleanup.py --rm-dir t186         # 删某个证据子目录（有引用则拒绝）
+  python cleanup.py --rm-dir t186 --force # 明知有引用还要删
 """
 from __future__ import annotations
 
@@ -17,11 +23,67 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _db_referenced(rel_prefix: str) -> list[str]:
+    """返回数据库中引用了该路径前缀的会话标识（如 `#275`）。"""
+    try:
+        import sys
+        sys.path.insert(0, str(ROOT / "tools"))
+        from db import get_db
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        rows = get_db()._conn().execute(
+            "select distinct session_id from events"
+            " where evidence like ?", (f"%{rel_prefix}%",)).fetchall()
+        return [f"#{r['session_id']}" for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def rm_dir(name: str, force: bool = False) -> int:
+    """删 storage/evidence/<name>，**先查数据库引用**。返回退出码。"""
+    target = (ROOT / "storage" / "evidence" / name).resolve()
+    root = (ROOT / "storage" / "evidence").resolve()
+    if not target.is_relative_to(root) or target == root:
+        print(f"拒绝：{name} 不是 evidence 下的子目录")
+        return 1
+    if not target.is_dir():
+        print(f"不存在：{target.relative_to(ROOT)}")
+        return 1
+
+    users = _db_referenced(f"evidence/{name}/")
+    if users and not force:
+        print(f"拒绝删除 storage/evidence/{name} —— 数据库里这些会话还引用着它："
+              f"{', '.join(users)}")
+        print("  删了记录页的截图会全部空白。确实要删请加 --force"
+              "（或先删掉那些会话记录）。")
+        return 2
+    if users:
+        print(f"⚠️ --force：{name} 仍被 {', '.join(users)} 引用，强行删除")
+
+    n = 0
+    for f in sorted(target.rglob("*"), reverse=True):
+        if f.is_file():
+            f.unlink(missing_ok=True)
+            n += 1
+        elif f.is_dir():
+            f.rmdir()
+    target.rmdir()
+    print(f"已删除 storage/evidence/{name}（{n} 个文件）")
+    return 0
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="清理过期证据/日志")
     p.add_argument("--days", type=int, default=7, help="保留最近 N 天，默认 7")
     p.add_argument("--dry", action="store_true", help="只报告不删除")
+    p.add_argument("--rm-dir", default=None,
+                   help="删 storage/evidence/<名字> 子目录（被数据库引用则拒绝）")
+    p.add_argument("--force", action="store_true", help="配合 --rm-dir：明知有引用也删")
     args = p.parse_args()
+
+    if args.rm_dir:
+        raise SystemExit(rm_dir(args.rm_dir, args.force))
 
     cutoff = time.time() - args.days * 86400
     try:
@@ -44,6 +106,11 @@ def main() -> None:
                 kept += 1
                 continue
             if f.stat().st_mtime >= cutoff:
+                kept += 1
+                continue
+            # ⚠️ 还被数据库引用着的证据**不删** —— 删了记录页就空白
+            rel = f.relative_to(ROOT).as_posix()
+            if _db_referenced(rel):
                 kept += 1
                 continue
             if args.dry:

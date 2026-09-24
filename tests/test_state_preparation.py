@@ -22,25 +22,10 @@ def response(output="", exit_code=0):
 
 
 class StateTests(unittest.TestCase):
-    def test_bulk_grant_uses_only_command_result(self):
-        for command, expected in [
-            (response(), True),
-            (response("", 1), False),
-            (response("Failure [package not found]"), False),
-            (response("Error: permission denied"), False),
-        ]:
-            with self.subTest(command=command):
-                d = Mock()
-                d.shell.return_value = command
-                result = state.grant_all(d, PACKAGE)
-                self.assertIs(result["ok"], expected)
-                self.assertEqual(result["output"], command.output)
-                self.assertEqual(result["exit_code"], command.exit_code)
-                d.shell.assert_called_once_with(["pm", "grant", "--all-permissions", PACKAGE])
-
-    def test_package_required_and_single_bulk_mutually_exclusive(self):
+    def test_single_permission_required_and_bulk_option_rejected(self):
         for args in [
             ["grant", "--all-permissions"],
+            ["grant", "--package", PACKAGE, "--all-permissions"],
             ["grant", "--package", PACKAGE],
             ["grant", "--package", PACKAGE, "--perm", "camera", "--all-permissions"],
             ["revoke", "--package", PACKAGE, "--all-permissions"],
@@ -51,14 +36,6 @@ class StateTests(unittest.TestCase):
                         state.main()
                     self.assertEqual(error.exception.code, 2)
                     connect.assert_not_called()
-
-    def test_invalid_bulk_package_never_runs_shell(self):
-        for package in ("", " ", "com.a; reboot", "--all-permissions"):
-            with self.subTest(package=package):
-                d = Mock()
-                with self.assertRaises(ValueError):
-                    state.grant_all(d, package)
-                d.shell.assert_not_called()
 
     def run_main(self, args, device, serial=None):
         with (
@@ -72,19 +49,14 @@ class StateTests(unittest.TestCase):
             self.assertTrue(logged.called)
             return emitted.call_args.args, logged.call_args.args
 
-    def test_bulk_cli_serial_and_recorded_result(self):
-        for args in [
-            ["--serial", "SERIAL", "grant", "--package", PACKAGE, "--all-permissions"],
-            ["grant", "--package", PACKAGE, "--all-permissions", "--serial", "SERIAL"],
-        ]:
+    def test_single_permission_serial_before_and_after_subcommand(self):
+        for args in (["--serial", "SERIAL", "grant", "--package", PACKAGE, "--perm", "camera"],
+                     ["grant", "--package", PACKAGE, "--perm", "camera", "--serial", "SERIAL"]):
             with self.subTest(args=args):
                 d = Mock()
-                d.shell.return_value = response()
-                (ok, payload), logged = self.run_main(args, d, serial="SERIAL")
+                d.shell.side_effect = [response(), response(f"{CAMERA}: granted=true")]
+                (ok, _), _ = self.run_main(args, d, serial="SERIAL")
                 self.assertTrue(ok)
-                self.assertTrue(payload["all_permissions"])
-                self.assertEqual(logged[:2], ("state", "state grant"))
-                self.assertEqual(logged[3], payload)
 
     def test_existing_cli_calls_remain_compatible(self):
         for command, extra, outputs, key, expected in [

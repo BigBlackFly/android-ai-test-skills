@@ -3,7 +3,9 @@
 清理对象包括图片、视频、下载文件及测试残留；保留 /sdcard/Android 及其内容。
 应用数据与权限保持原状。
 
-供其他模块调用：clear(serial)、init(serial)。
+开会话后由测试 Agent 按准备文档显式调用，结果记入当前会话。
+入口：python tools/prepare --serial <serial> sdcard init|clear
+也可供其他模块调用：clear(serial)、init(serial)。
 """
 from pathlib import Path, PurePosixPath
 import os
@@ -12,7 +14,7 @@ import shlex
 import stat
 import subprocess
 
-MEDIA_DIR = Path(__file__).resolve().parents[1] / "media-resources"
+MEDIA_DIR = Path(__file__).resolve().parents[2] / "media-resources"
 PROTECTED_FOLDERS = ["Android"]
 EMPTY_FOLDERS = (
     "Alarms", "Audiobooks", "Download", "DCIM", "Documents", "Music",
@@ -31,7 +33,7 @@ MEDIA_TARGETS = {
 
 
 class SDCardError(RuntimeError):
-    """文件操作异常，由准备入口记录后继续测试。"""
+    """文件操作异常，由准备入口返回并记入当前会话。"""
 
 
 class SDCard:
@@ -200,33 +202,40 @@ class SDCard:
 
 
 def _prepare(serial, *, initialize):
-    """尽力执行文件准备，以 INFO 事件记录过程，随后继续测试。"""
+    """显式执行文件准备，返回实际结果，并沿用当前会话的 INFO 事件。"""
     from common import log_auto
 
     action = "sdcard_init" if initialize else "sdcard_clear"
-    entry = {"action": action, "status": "INFO", "detail": f"{action} 已执行", "data": {}}
+    entry = {"action": action, "serial": serial, "status": "INFO", "ok": False,
+             "detail": f"{action} 已完成", "data": {}}
 
     def adb_run(*args, timeout=30, text=False):
         return subprocess.run(["adb", "-s", serial, *args],
                               capture_output=True, timeout=timeout, text=text)
 
     try:
-        if not serial:
-            raise SDCardError("设备未连接，文件准备未完成")
+        if not serial or not serial.strip():
+            raise SDCardError("必须显式指定设备 serial，文件准备未执行")
         worker = SDCard(adb_run)
         entry["data"] = worker.init() if initialize else worker.clear()
+        entry["ok"] = True
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        entry["detail"] = f"{action} 执行异常: {exc}；继续测试"
+        entry["error"] = str(exc)
+        entry["detail"] = f"{action} 执行异常: {exc}"
 
     log_auto("preparation", "preparation " + action, entry["detail"], entry)
-    return {"status": "INFO", "steps": [entry]}
+    result = {"ok": entry["ok"], "action": action, "serial": serial,
+              "status": "INFO", "steps": [entry]}
+    if "error" in entry:
+        result["error"] = entry["error"]
+    return result
 
 
 def clear(serial):
-    """清理用户文件并刷新媒体索引，异常记录后继续测试。"""
+    """清理用户文件并刷新媒体索引，返回结果并记录当前会话。"""
     return _prepare(serial, initialize=False)
 
 
 def init(serial):
-    """清理用户文件并预置测试媒体，异常记录后继续测试。"""
+    """清理用户文件并预置测试媒体，返回结果并记录当前会话。"""
     return _prepare(serial, initialize=True)

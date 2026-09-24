@@ -191,7 +191,7 @@ assert rm["in_scope_count"] == 1, rm
 print("9 crash_grading_ok  同批内 target 与 other 并存时取 target（不再被 other 掩盖）")
 
 # ── 10. Review 回归：nav 模式保留可滑动容器 ─────────────────────────
-from common import summarize_xml  # noqa: E402
+from common import next_targets, npm_identity, summarize_xml  # noqa: E402
 NAV_XML = ('<hierarchy>'
            '<node class="android.widget.ListView" scrollable="true" clickable="false"'
            ' bounds="[0,0][100,200]" resource-id="app:id/list"/>'
@@ -351,6 +351,112 @@ assert len(_full) == 4, f"full 应含全部语义节点: {_full}"
 assert len(_filt) == 3 and not any(n.get("text") == "状态栏时钟" for n in _filt), \
     f"fg_package 应滤掉 systemui: {_filt}"
 print("15 nodes_modes_ok  nav(可点+可滑动) / full(全部) / fg_package(按前台包过滤)")
+
+# ── 16. perm.handle：点不动的权限框不要连点 ──────────────────────────
+# 真实场景：按钮存在但点击无效（disabled/遮挡/坐标偏）。早先会连点 chain_max 次，
+# 最坏 0.8 + 7×2.0 + 8×0.5 ≈ 18s 全耗在这一步。做法同人：点一下看有没有反应。
+class _DeadButtonDev:
+    """假设备：权限框一直在，点它毫无反应（屏幕内容不变）。"""
+    def __init__(self):
+        self.clicks = []
+
+    def app_current(self):
+        return {"package": "com.android.permissioncontroller",
+                "activity": ".permission.ui.GrantPermissionsActivity"}
+
+    def dump_hierarchy(self):
+        return ('<hierarchy>'
+                '<node text="日历正在尝试读取联系人" bounds="[0,0][100,20]"/>'
+                '<node text="允许" clickable="true" '
+                f'resource-id="{_P}permission_allow_button" bounds="[0,0][10,10]"/>'
+                '</hierarchy>')
+
+    def click(self, x, y):
+        self.clicks.append((x, y))      # 点了没反应：不改任何状态
+
+
+_db = _DeadButtonDev()
+_dr = _perm.handle(_db, action=None, timeout_s=0.2)
+assert len(_db.clicks) == 1, \
+    f"点不动的框只该试 1 次，实际连点 {len(_db.clicks)} 次（会白等十几秒）"
+assert _dr.get("stuck") is True, f"应标记 stuck 交回 AI：{_dr}"
+assert _dr["handled"] is True, _dr
+print("16 perm_dead_button_ok  点不动的权限框只试一次即停（不连点到超时）")
+
+# ── 17. next_targets：精简可点清单（act/observe 的返回头条）──────────
+_mixed = [
+    {"c": [10, 10], "r": "decor_no_semantics"},                 # 三无 → 排最后
+    {"c": [20, 20], "t": "课程表", "r": "item_title"},           # 有文字 → 最前
+    {"c": [30, 30], "d": "导入课程表", "r": "act_import"},       # 有 desc → 中间
+    {"c": [20, 20], "t": "课程表", "r": "item_title"},           # 重复 → 去重
+    {"c": [40, 40], "t": "设置", "r": "act_settings", "s": True},
+]
+_nt = next_targets(_mixed, limit=10)
+assert len(_nt) == 4, f"应去重成 4 条，实际 {len(_nt)}"
+assert _nt[0].get("t") == "课程表", f"有文字的最前：{_nt[0]}"
+assert next_targets(_mixed, limit=2) and len(next_targets(_mixed, limit=2)) == 2
+assert next_targets([{"clickable": False, "center": [1, 1], "text": "不可点"}]) == [], \
+    "full 模式里不可点的要排除"
+
+# ── 18. next_targets 的「子节点文字冒泡」────────────────────────────
+# 场景：可点容器自己没有文字（菜单项、列表行），文字在子节点里。
+# 不冒泡的话 next 只有坐标没标签，AI 还得回去翻 nodes/另起 observe。
+_nodes_bubble = [{"c": [2697, 371], "r": "item_title"},          # 容器无文字
+                 {"c": [2697, 532], "r": "item_title"}]
+_labeled = [(2697, 375, "课程表"), (2697, 535, "设置")]
+_bt = next_targets(_nodes_bubble, labeled=_labeled)
+assert len(_bt) == 2, _bt
+assert _bt[0].get("t") == "课程表", f"应把子节点文字冒泡给容器：{_bt[0]}"
+assert _bt[1].get("t") == "设置", _bt[1]
+# 无 labeled 时行为不变（不报错、只是没标签）
+assert next_targets(_nodes_bubble)[0].get("t") is None
+# 已有的自带文字不被冒泡覆盖
+_own = next_targets([{"c": [100, 100], "t": "自有文字"}], labeled=[(100, 100, "别的字")])
+assert _own[0].get("t") == "自有文字", _own[0]
+print("18 next_targets_bubble_ok  容器无文字时从子节点冒泡（菜单项/列表行可用）")
+print("17 next_targets_ok  精简可点清单（去重/评分排序/limit/双模式兼容）")
+
+# ── 19. 路径边的「节点归属」（自动整理草稿的核心）────────────────────
+# 采集到的边只有 activity，要靠节点的「识别键」+ 当时的屏幕签名，
+# 才能归成人类读得懂的节点名（如「课程表页-空态」而不是 `TimetableActivity`）。
+from session import _match_node, _parse_path_nodes  # noqa: E402
+
+_PT = """## 课程表页-空态
+
+- **activity**: `.timetable.display.TimetableActivity`
+- **认出它**: 有「还未添加课程表」
+- **识别键**: `text=还未添加课程表` · `rid=btnCreateManually`
+
+## 课程表页-周视图
+
+- **activity**: `.timetable.display.TimetableActivity`
+- **识别键**: `desc=导入课程表` · `desc=课程表设置`
+
+## 自动采集的边
+"""
+_pn = _parse_path_nodes(_PT)
+assert [n["name"] for n in _pn] == ["课程表页-空态", "课程表页-周视图"], _pn
+assert _pn[0]["keys"] == [("text", "还未添加课程表"), ("rid", "btnCreateManually")], _pn[0]
+# 同 activity 的两个形态，靠识别键分清（这正是节点名存在的意义）
+assert _match_node(_pn, {"text=还未添加课程表", "rid=btnCreateManually"}) == "课程表页-空态"
+assert _match_node(_pn, {"desc=导入课程表", "desc=课程表设置"}) == "课程表页-周视图"
+# 一个都不命中时返回空（宁可归不出，也不乱归）
+assert _match_node(_pn, {"rid=whatever"}) == "", "不该瞎猜节点"
+print("19 path_node_match_ok  节点解析 + 同 activity 多形态靠识别键区分")
+
+# ── 20. 屏幕身份签名（npm_identity）──────────────────────────────────
+_IX = ('<hierarchy>'
+       '<node resource-id="app:id/a" text="课程表" content-desc="导入课程表"'
+       ' package="com.app" bounds="[0,0][10,10]"/>'
+       '<node resource-id="app:id/a" text="课程表" package="com.app" bounds="[0,0][10,10]"/>'
+       '<node resource-id="other:id/b" text="别的" package="com.other" bounds="[0,0][10,10]"/>'
+       '</hierarchy>')
+_sig = npm_identity(_IX, fg_package="com.app")
+assert "rid=a" in _sig and "text=课程表" in _sig and "desc=导入课程表" in _sig, _sig
+assert len([x for x in _sig if x == "text=课程表"]) == 1, f"应去重：{_sig}"
+assert not any("别的" in x for x in _sig), f"非前台包应滤掉：{_sig}"
+assert npm_identity("<bad", fg_package="com.app") == [], "坏 XML 不抛异常"
+print("20 npm_identity_ok  屏幕身份签名（去重/按前台包过滤/坏XML不抛）")
 
 # 清理
 for f in Path("storage").glob(".crash_seen_*"):

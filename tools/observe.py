@@ -8,8 +8,8 @@ from __future__ import annotations
 import argparse
 
 from common import (add_common_args, backfill_package, capture, connect, emit,
-                    evidence_paths, fail, guard_terminated, log_auto, rel,
-                    summarize_xml)
+                    evidence_paths, fail, guard_terminated, log_auto, next_targets, labeled_nodes, npm_identity,
+                    rel, summarize_xml)
 import time
 from datetime import datetime
 
@@ -51,6 +51,12 @@ def main() -> None:
         clk = ", ".join(c["text"] for c in perm_result.get("clicks") or [])
         detail += (f" · 权限弹窗({perm_result.get('activity')})"
                    + (f" 已自动点击: {clk}" if clk else " 未点击"))
+    # 和 act 一样带**屏幕身份签名** —— 自动整理路径边时要靠它判"这一步在哪个节点"。
+    # ⚠️ observe 也必须带：会话开头往往先 observe（还没有 act），
+    # 若它没签名，第一条边的前溯就落空，源节点只能退回裸 activity（真实缺陷）。
+    info = {**info, "sig": npm_identity(
+        xml.read_text(encoding="utf-8"),
+        None if getattr(args, "no_filter", False) else info.get("package"))}
     log_auto("observe", "observe", detail, info, rel(png), duration_ms, started_at)
 
     # 崩溃检测：observe 也必须做。
@@ -112,11 +118,14 @@ def main() -> None:
     payload = {
         **info,
         "evidence": {"png": str(png), "xml": str(xml), "meta": str(meta)},
+        "next": next_targets(nodes, labeled=labeled_nodes(   # 精简可点清单（与 act 一致）
+            xml.read_text(encoding="utf-8"),
+            None if getattr(args, "no_filter", False) else info.get("package"))),
         "nodes": nodes,
         "nodes_count": len(nodes),
         "nodes_mode": "full" if getattr(args, "full", False) else "nav",
-        "hint": ("定位：优先 r/rid > t/text > c/center（本次 dump 现场推导，禁止复用旧值）。"
-                 "nodes 为导航模式（仅可点/可滑动节点）；要按页面文字做断言时加 --full"),
+        "hint": ("定位降级链：r/rid > d/desc > t/text > c/center（坐标本次 dump 现场派生）。"
+                 "`next` 是精简可点清单；要按页面文字做断言时加 --full"),
     }
     if k_hint:
         payload["knowledge_hint"] = k_hint
